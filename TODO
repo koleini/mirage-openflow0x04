@@ -1,0 +1,30 @@
+todo:
+
+dpid in init_switch_info?
+
+port name in port structure is ""
+
+fix: hw_addr = Packet.mac_of_string (E.mac ethif) in Ofswitch.ml
+
+fix: let tupple = (OP.Match.raw_packet_to_match in_port frame ) in Ofswitch.ml
+
+fix flow_match_compare'
+
+How to optionally ad port to the switch (like first version, remotely?) test?
+
+name in init_port
+
+mac address in init_port
+
+ignore-change ethernet interface connected...
+
+fix all warnings
+
+packet priority?
+
+Table-miss usage? At the moment, I think we just forward it to the controller. (Yes, in 0x01)
+
+Table id?
+
+Handling timeouts?
+
