@@ -1276,15 +1276,33 @@ module Make(T:TCPV4 (* controller *))(N:NETWORK) = struct
 		| Some t -> OSK.send_packet t 
 			(Message.marshal (Random.int32 Int32.max_int) (PortStatusMsg {reason = PortAdd; desc = port.phy}))
   
-  let get_flow_stats (table : Table.t) (ptrn : OfpMatch.t) =
-	let match_flows ptrn key value ret =
-	  if (SoxmMatch.check_flow_overlap key ptrn (* wcard *)) then ( 
+  let get_flow_stats (table : Table.t) (of_match : OfpMatch.t) out_port out_grp cookie =
+	let match_flows of_match key value ret =
+	  if (SoxmMatch.check_flow_overlap key of_match && 
+		  ( (out_port = 0xffffl (* OFPP_ANY *)) || 
+			(is_output_port out_port flow.Entry.instructions) )
+		  ) &&
+		  ( (out_grp = 0xffffffffl (* OFPG_ANY *)) || 
+			(is_output_group out_grp flow.Entry.instructions) )
+		  ) &&
+		  ( (out_grp = 0xffffffffl (* OFPG_ANY *)) || 
+			(is_output_group out_grp flow.Entry.instructions) )
+		  ) 
+		 ) then ( 
 	  (Entry.flow_counters_to_flow_stats key (1) value)::ret  (* XXX table id? *)
 	  ) else 
         ret 
 	in
-	  Hashtbl.fold (fun key value r -> match_flows ptrn key value r) 
+	  Hashtbl.fold (fun key value r -> match_flows of_match key value r) 
 	  table.Table.entries []  
+
+          if ((SoxmMatch.check_flow_overlap of_match dflow) && 
+              ((port_num = 0xffffl) ||  
+               (is_output_port port_num flow.Entry.instructions))) then ( 
+
+
+
+
 
 let process_buffer_id (st : t') t msg xid buffer_id actions = (* XXX important: check functionality *)
   let pkt_in = ref None in
@@ -1334,22 +1352,33 @@ let process_openflow (st : t') t (xid, msg) =
 		  | PortsDescReq ->
 			let stats = PortsDescReply (List.map (fun x -> x.phy) st.ports) in
 			let rep = {mpreply_typ = stats; mpreply_flags = false} in (* XXX check flag *)
- 			  OSK.send_packet t (Message.marshal xid (MultipartReply rep)) 
-(*		  | FlowStatsReq req ->
+ 			  OSK.send_packet t (Message.marshal xid (MultipartReply rep))
 
+		  | FlowStatsReq 
+				{ fr_table_id = table_id; fr_out_port = port
+				; fr_out_group = gport; fr_cookie = fcookie
+				; fr_match = of_match} ->
+			  let rec add_flow_stats tables =
+				match tables with
+				| [] -> []
+				| h::t -> (get_flow_stats h of_match port gport fcookie) @ (add_flow_stats t)
+			  in
+			  try
+			  	let table_list =
+				  match table_id with
+		 		  | 0xff -> st.table (* OFPTT_ALL *)
+				  | t -> 
+					  [ List.find (fun x -> x.Table.tid = t) st.table ]
+			  	in
+				  let flows = { mpreply_typ = FlowStatsReply (add_flow_stats table_list)
+							  ; mpreply_flags = false} in
+				  OSK.send_packet t (Message.marshal xid (MultipartReply flows))
 
+			  with Not_found ->
+				pp "[switch] invalid table id (%d) in flow stats request\n%!" table_id;
+				OSK.send_packet t (Message.marshal xid (Error { err = BadRequest ReqBadTableId
+															  ; data = Cstruct.create 0}))
 
-type flowRequest = {fr_table_id : tableId; fr_out_port : portId; 
-                    fr_out_group : portId; fr_cookie : int64 mask;
-                    fr_match : oxmMatch}
-
-
-
-type flowStats = { table_id : tableId; duration_sec : int32; duration_nsec : 
-                   int32; priority : int16; idle_timeout : timeout; 
-                   hard_timeout : timeout; flags : flowModFlags; cookie : int64;
-                   packet_count : int64; byte_count : int64; ofp_match : oxmMatch;
-                   instructions : instruction list} *)
 (*
 		  | PortStatsReq port ->
 			let stats = PortStatsReply (List.map (fun x -> x.counter) st.ports) in
