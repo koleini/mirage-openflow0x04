@@ -943,7 +943,7 @@ module Make(T:TCPV4 (* controller *))(N:NETWORK) = struct
     mutable controller: OSK.conn_state option;
     mutable last_echo_req : float;
     mutable echo_resp_received : bool;
-    table: Table.t;
+    table: Table.t list;
     stats: stats;
     mutable errornum : int32;
     mutable portnum : int32;
@@ -1199,14 +1199,14 @@ module Make(T:TCPV4 (* controller *))(N:NETWORK) = struct
     return ()
 
 
-  let lookup_flow (st : t') of_match =
+  let lookup_flow (table : Table.t) of_match =
   (* Check first the match table cache
    * NOTE an exact match flow will be found on this step and thus 
    * return a result immediately, without needing to get to the cache table
    * and consider flow priorities *)
 	(* let _ = pp "[switch] comparing flow %s\n" (flow_info_to_string of_match) in *)
-	if (Hashtbl.mem st.table.cache of_match) then
-       let entry = (Hashtbl.find st.table.cache of_match) in
+	if (Hashtbl.mem table.cache of_match) then
+       let entry = (Hashtbl.find table.cache of_match) in
      	Found(entry) 
 	else begin
      (* Check the wilcard card table *)
@@ -1219,11 +1219,11 @@ module Make(T:TCPV4 (* controller *))(N:NETWORK) = struct
 		   Some(flow, entry)
 		| (_, _) -> r
 		in
-		let flow_match = Hashtbl.fold lookup_flow st.table.entries None in
+		let flow_match = Hashtbl.fold lookup_flow table.entries None in
 		  match (flow_match) with
 		  | None ->  NOT_FOUND
 		  | Some(f,e) ->
-		    Hashtbl.add st.table.cache of_match (ref e);
+		    Hashtbl.add table.cache of_match (ref e);
 		    Entry.(e.match_fields <- of_match :: e.match_fields); 
 		  	  Found (ref e)
 	end
@@ -1247,7 +1247,7 @@ module Make(T:TCPV4 (* controller *))(N:NETWORK) = struct
 	last_echo_req=0.; echo_resp_received=true;
 	stats= {n_frags=0L; n_hits=0L; n_missed=0L; n_lost=0L;};
 	errornum = 0l; portnum=0l;
-	table = (Table.init_table ());
+	table = [Table.init_table ()]; (* XXX we create a single table at the moment *)
 	features'=(switch_features dpid); 
 	packet_buffer=[]; packet_buffer_id=0l; ready=(Lwt_condition.create ());
 	verbose; pkt_len=1500;}
@@ -1276,7 +1276,7 @@ module Make(T:TCPV4 (* controller *))(N:NETWORK) = struct
 		| Some t -> OSK.send_packet t 
 			(Message.marshal (Random.int32 Int32.max_int) (PortStatusMsg {reason = PortAdd; desc = port.phy}))
   
-  let get_flow_stats (st : t') (ptrn : OfpMatch.t) =
+  let get_flow_stats (table : Table.t) (ptrn : OfpMatch.t) =
 	let match_flows ptrn key value ret =
 	  if (SoxmMatch.check_flow_overlap key ptrn (* wcard *)) then ( 
 	  (Entry.flow_counters_to_flow_stats key (1) value)::ret  (* XXX table id? *)
@@ -1284,7 +1284,7 @@ module Make(T:TCPV4 (* controller *))(N:NETWORK) = struct
         ret 
 	in
 	  Hashtbl.fold (fun key value r -> match_flows ptrn key value r) 
-	  st.table.Table.entries []  
+	  table.Table.entries []  
 
 let process_buffer_id (st : t') t msg xid buffer_id actions = (* XXX important: check functionality *)
   let pkt_in = ref None in
