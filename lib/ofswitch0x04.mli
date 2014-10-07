@@ -18,7 +18,7 @@
 open V1_LWT
 open Lwt
 
-(*
+
 module Make(T: TCPV4)(N: NETWORK): sig
 
   type eth_t = Ethif.Make(N).t
@@ -26,4 +26,4 @@ module Make(T: TCPV4)(N: NETWORK): sig
   val create_switch : T.t -> (string * int) -> (eth_t list)-> unit Lwt.t
 
 end
-*)
+

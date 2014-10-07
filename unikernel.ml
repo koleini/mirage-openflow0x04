@@ -25,13 +25,13 @@ module Main (C: CONSOLE)(S: STACKV4)(N1: NETWORK)(N2: NETWORK) = struct
 	| `Error e -> fail (Failure ("error starting " ^ name))
 	| `Ok t -> C.log_s c (green "%s connected..." name) >>
 			   return t
-(*
+
   module T = S.TCPV4
   module E = Ethif.Make(N1)
   module Sw = Ofswitch0x04.Make(T)(N1)
-*)
+
   let start console s n1 n2 =
-(*
+
   let netl = [n1; n2] in
 	(* mirage main module <= 1.2.0 doesn't accept list as the parameter.
 	   write input network devices as a list until mirage supprts list parameters *)
@@ -47,6 +47,6 @@ module Main (C: CONSOLE)(S: STACKV4)(N1: NETWORK)(N2: NETWORK) = struct
 	>>= fun e ->
 		Sw.create_switch (S.tcpv4 s) (* (switchaddr, netmask, gateway) *) (contaddr, contport) e
 	>>=
-	 fun fl -> *)
+	 fun fl -> 
 		return ();
 end

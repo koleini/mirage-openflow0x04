@@ -30,7 +30,8 @@ module Message = OpenFlow0x04.Message
 exception Packet_type_unknw
 exception Unparsable of string * Cstruct.t 
 exception Unparsed of string * Cstruct.t 
-exception Unsupported of string 
+exception Unsupported of string
+exception Overlap
 
 let sp = Printf.sprintf
 let pp = Printf.printf
@@ -53,12 +54,6 @@ let or_error name fn t =
 			   return t
 
 module Entry = struct
-
-  type table_counter = {
-    n_active: int32;
-    n_lookups: int64;
-    n_matches: int64;
-  }
 
   type flow_counter = {
     mutable n_packets: int64;
@@ -96,7 +91,7 @@ module Entry = struct
   let init_flow_counters flowmod = (* we may require more information to save *)
     let ts = int_of_float (Clock.time ()) in
     ({n_packets=0L; n_bytes=0L;
-	  priority=flowmod.mfPriority; cookie=flowmod.mfCookie;
+	  priority=flowmod.mfPriority; cookie=flowmod.mfCookie; (* XXX what to do? *)
 	  insert_sec=ts; insert_nsec=0; (* XXX Do we need nsec? timeouts are in sec *)
 	  last_sec=ts; last_nsec=0; idle_timeout=flowmod.mfIdle_timeout; hard_timeout=flowmod.mfHard_timeout;
 	  flags=flowmod.mfFlags; })
@@ -121,7 +116,7 @@ module Entry = struct
 	; idle_timeout = flow.counters.idle_timeout
 	; hard_timeout = flow.counters.hard_timeout
 	; flags = flow.counters.flags
-	; cookie = flow.counters.cookie.m_value
+	; cookie = flow.counters.cookie.m_value (* XXX note: flow stats doesn't have mask... what does it mean? *)
 	; packet_count = flow.counters.n_packets
 	; byte_count = flow.counters.n_bytes
 	; instructions = flow.instructions
@@ -244,67 +239,6 @@ module SoxmMatch = struct
 	; mutable ipv6NDTll : dlAddr option (** Target Link Layer Address in IPV6 Neighbor Discovery Message **)
     }	
 
-(*
-  let match_to_flow_info of_match =
-	let finfo = ref
-			{ inPort = 0l
-			; ethDst = 0L; ethSrc = 0L; ethTyp = 0
-			; dlVlan = Some 0xffff (* TODO *)
-			; dlVlanPcp = 0
-			; ipv4Src = None; ipv4Dst = None; ipDSCP = None; ipECN = None; ipProto = None
-			; tcpSrc = None; tcpDst = None; udpSrc = None; udpDst = None; sctpSrc = None
-			; sctpDst = None; icmpv4Type = None; icmpv4Code = None; arpOpcode = None
-			; arpSpa = None; arpTpa = None; arpSha = None; arpTha = None
-			; ipv6Src = None; ipv6Dst = None; ipv6flabel = None; icmpv6Type = None
-			; icmpv6Code = None; ipv6NDTarget = None; ipv6NDSll = None; ipv6NDTll = None }
-	in
-	let rec build_info of_match =
-	match of_match with
-	| [] -> return ()
-	| (OxmInPort portId)::t -> finfo.inPort <- portId; build_info t
-(*	| OxmInPhyPort of portId
-	| OxmMetadata of int64 mask 
-	| OxmEthType of int16
-	| OxmEthDst of int48 mask
-	| OxmEthSrc of int48 mask
-	| OxmVlanVId of int12 mask
-	| OxmVlanPcp of int8
-	| OxmIPProto of int8
-	| OxmIPDscp of int8
-	| OxmIPEcn of int8
-	| OxmIP4Src of int32 mask
-	| OxmIP4Dst of int32 mask
-	| OxmTCPSrc of int16
-	| OxmTCPDst of int16
-	| OxmARPOp of int16
-	| OxmARPSpa of int32 mask
-	| OxmARPTpa of int32 mask
-	| OxmARPSha of int48 mask
-	| OxmARPTha of int48 mask
-	| OxmICMPType of int8
-	| OxmICMPCode of int8
-	| OxmMPLSLabel of int32
-	| OxmMPLSTc of int8
-	| OxmTunnelId of int64 mask
-	| OxmUDPSrc of int16
-	| OxmUDPDst of int16
-	| OxmSCTPSrc of int16
-	| OxmSCTPDst of int16
-	| OxmIPv6Src of int128 mask
-	| OxmIPv6Dst of int128 mask
-	| OxmIPv6FLabel of int32 mask
-	| OxmICMPv6Type of int8
-	| OxmICMPv6Code of int8
-	| OxmIPv6NDTarget of int128 mask
-	| OxmIPv6NDSll of int48
-	| OxmIPv6NDTll of int48
-	| OxmMPLSBos of bool
-	| OxmPBBIsid of int24 mask
-	| OxmIPv6ExtHdr of oxmIPv6ExtHdr mask
-*)
-	in
-	  build_info of_match
-*)
   let oxm_to_num m =
 	match m with
 	| OxmInPort _ 		-> 0
@@ -351,103 +285,6 @@ module SoxmMatch = struct
   (* TODO: sort ofpMatch sent by controller before any processing ... *)
   let sort_of_match m1 m2 = (oxm_to_num m1) - (oxm_to_num m2)
 
-(*
-  let raw_packet_to_flow in_port bits =
-	let ethDst = Packet.mac_of_bytes (Cstruct.to_string (get_dl_header_dl_dst bits)) in
-    let ethSrc = Packet.mac_of_bytes (Cstruct.to_string (get_dl_header_dl_src bits)) in
-    let eth_type = get_dl_header_dl_type bits in
-    let bits = Cstruct.shift bits sizeof_dl_header in 
-    match (eth_type) with 
-    | 0x0800 -> begin (* IPv4 *)
-      let nw_src = get_nw_header_nw_src bits in 
-      let nw_dst = get_nw_header_nw_dst bits in 
-      let nw_proto = get_nw_header_nw_proto bits in 
-      let nw_tos = get_nw_header_nw_tos bits in 
-      let len = (get_nw_header_hlen_version bits) land 0xf in 
-      let bits = Cstruct.shift bits (len*4) in
-	  let tcpSrc, tcpDst, udpSrc, udpDst, sctpSrc, sctpDst,
-			icmpv4Type, icmpv4Code, icmpv6Type, icmpv6Code,
-			ipv6NDTarget, ipv6NDSll, ipv6NDTll =
-			ref None, ref None, ref None, ref None, ref None, ref None,
-			ref None, ref None, ref None, ref None,
-			ref None, ref None, ref None in
-	  let _ =
-        match (nw_proto) with
-        | 1  -> icmpv4Type := Some (get_icmphdr_typ bits); icmpv4Code := Some (get_icmphdr_code bits);
-        | 6  -> tcpSrc := Some (get_tp_header_tp_src bits); tcpDst := Some (get_tp_header_tp_dst bits);
-        | 17 -> udpSrc := Some (get_tp_header_tp_src bits); udpSrc := Some (get_tp_header_tp_dst bits);
-        | 58 -> let typ = get_icmphdr_typ bits in
-				icmpv6Type := Some typ; icmpv6Code := Some (get_icmphdr_code bits);
-				match typ with
-				| 135 -> ipv6NDTarget := Some (get_icmpv6_m135_m136_nw_dst1 bits, get_icmpv6_m135_m136_nw_dst2 bits);
-				(* TODO ipv6NDSll *)
-				| 136 -> ipv6NDTarget := Some (get_icmpv6_m135_m136_nw_dst1 bits, get_icmpv6_m135_m136_nw_dst2 bits);
-				(* TODO ipv6NDTll *)
-		| 132-> sctpSrc := Some (get_tp_header_tp_src bits); sctpDst := Some (get_tp_header_tp_dst bits);
-		in 
-			{ inPort = in_port
-			; ethDst; ethSrc
-			; ethTyp = eth_type
-			; dlVlan = Some 0xffff (* TODO *)
-			; dlVlanPcp = 0
-			; ipv4Src = Some nw_src (* XXX change type? *)
-			; ipv4Dst = Some nw_dst
-			; ipDSCP = Some (nw_tos lsr 2)
-			; ipECN = Some (nw_tos land 3)
-			; ipProto = Some nw_proto
-			; tcpSrc = !tcpSrc; tcpDst = !tcpDst; udpSrc = !udpSrc; udpDst = !udpDst
-			; sctpSrc = !sctpSrc; sctpDst = !sctpDst; icmpv4Type = !icmpv4Type; icmpv4Code = !icmpv4Code
-			; arpOpcode = None; arpSpa = None; arpTpa = None; arpSha = None; arpTha = None
-			; ipv6Src = None; ipv6Dst = None; ipv6flabel = None
-			; icmpv6Type = !icmpv6Type; icmpv6Code = !icmpv6Code
-			; ipv6NDTarget = !ipv6NDTarget; ipv6NDSll = !ipv6NDSll; ipv6NDTll = !ipv6NDTll }
-      end
-    | 0x86dd -> (* IPv6 : TODO *)
-		{ inPort = in_port
-		; ethDst; ethSrc
-		; ethTyp = eth_type
-		; dlVlan = (Some 0xffff)
-		; dlVlanPcp = 0
-		; ipv4Src = None; ipv4Dst = None; ipDSCP = None; ipECN = None; ipProto = None
-		; tcpSrc = None; tcpDst = None; udpSrc = None; udpDst = None
-		; sctpSrc = None; sctpDst = None; icmpv4Type = None; icmpv4Code = None
-		; arpOpcode = None; arpSpa = None; arpTpa = None; arpSha = None; arpTha = None
-		; ipv6Src = Some (get_ipv6_header_nw_src1 bits, get_ipv6_header_nw_src2 bits)
-		; ipv6Dst = Some (get_ipv6_header_nw_dst1 bits, get_ipv6_header_nw_dst2 bits)
-		; ipv6flabel = Some (Int32.logand (get_ipv6_header_version_class_flow bits) (Int32.of_int 0xfffff))
-		; icmpv6Type = None; icmpv6Code = None
-		; ipv6NDTarget = None; ipv6NDSll = None; ipv6NDTll = None } 
-    | 0x0806 -> (* ARP :TODO *)
-		{ inPort = in_port 
-		; ethDst; ethSrc
-		; ethTyp = eth_type
-		; dlVlan = (Some 0xffff)
-		; dlVlanPcp = 0
-		; ipv4Src = None; ipv4Dst = None; ipDSCP = None; ipECN = None; ipProto = None
-		; tcpSrc = None; tcpDst = None; udpSrc = None; udpDst = None
-		; sctpSrc = None; sctpDst = None; icmpv4Type = None; icmpv4Code = None
-		; arpOpcode = Some (get_arphdr_ar_op bits)
-		; arpSpa = Some (get_arphdr_nw_src bits)
-		; arpTpa = Some (get_arphdr_nw_dst bits)
-		; arpSha = Some (Packet.mac_of_bytes (Cstruct.to_string (get_arphdr_ar_sha bits)))
-		; arpTha = Some (Packet.mac_of_bytes (Cstruct.to_string (get_arphdr_ar_tha bits)))
-		; ipv6Src = None; ipv6Dst = None; ipv6flabel = None
-		; icmpv6Type = None; icmpv6Code = None
-		; ipv6NDTarget = None; ipv6NDSll = None; ipv6NDTll = None } 
-    | _ ->  (* TODO MPLS and ... *)
-		{ inPort = in_port 
-		; ethDst; ethSrc
-		; ethTyp = eth_type
-		; dlVlan = (Some 0xffff)
-		; dlVlanPcp = 0
-		; ipv4Src = None; ipv4Dst = None; ipDSCP = None; ipECN = None; ipProto = None
-		; tcpSrc = None; tcpDst = None; udpSrc = None; udpDst = None
-		; sctpSrc = None; sctpDst = None; icmpv4Type = None; icmpv4Code = None
-		; arpOpcode = None; arpSpa = None; arpTpa = None; arpSha = None; arpTha = None
-		; ipv6Src = None; ipv6Dst = None; ipv6flabel = None
-		; icmpv6Type = None; icmpv6Code = None
-		; ipv6NDTarget = None; ipv6NDSll = None; ipv6NDTll = None } 
-*)
 
   let raw_packet_to_match in_port bits = (* builds openflow match in order *)
 	let ethDst = Packet.mac_of_bytes (Cstruct.to_string (get_dl_header_dl_dst bits)) in
@@ -503,98 +340,8 @@ module SoxmMatch = struct
 		]
     | _ ->  (* TODO MPLS and ... *)
 		network
-(*
-  let rec flow_match_compare flow flow_patten =
-	let check_with_mask f f_p l_and =
-	  match f, f_p with
-	  | v, {m_value = v_p; m_mask = None} -> v = v_p
-	  | v, {m_value = v_p; m_mask = Some m} -> (l_and v m) = (l_and v_p m)
-	in
-	let compare f f_p =
-	  match f, f_p with
-	  | Some x, y -> x = y
-	  | None, _ -> false
-	in
-	let check cond t =
-		if cond then flow_match_compare flow t else false
-	in
-	  match flow_patten with
-	  | [] -> true
-	  | h::t -> match h with
-		| OxmInPort portId -> check (flow.inPort = portId) t
-		(* | OxmInPhyPort portId -> *)
-		(* | OxmMetadata of int64 mask *)
-		| OxmEthType ethType -> check (flow.ethTyp = ethType) t
-		| OxmEthDst ethDst -> check (check_with_mask flow.ethDst ethDst Int64.logand) t
-		| OxmEthSrc ethSrc -> check (check_with_mask flow.ethSrc ethSrc Int64.logand) t
-		(* | OxmVlanVId of int12 mask *)
-		(* | OxmVlanPcp of int8 *)
-		| OxmIPProto ipProto -> check (compare flow.ipProto ipProto) t
-		| OxmIPDscp ipDSCP -> check (compare flow.ipDSCP ipDSCP) t
-		| OxmIPEcn ipECN -> check (compare flow.ipECN ipECN) t
-		| OxmIP4Src ipv4Src -> begin
-							   match flow.ipv4Src with
-								| None -> check true t
-								| Some x -> check (check_with_mask x ipv4Src Int32.logand) t
-							   end
-		| OxmIP4Dst ipv4Dst -> begin
-							   match flow.ipv4Dst with
-								| None -> check true t
-								| Some x -> check (check_with_mask x ipv4Dst Int32.logand) t
-							   end
-		| OxmTCPSrc tcpSrc -> check (compare flow.tcpSrc tcpSrc) t
-		| OxmTCPDst tcpDst -> check (compare flow.tcpDst tcpDst) t
-		| OxmARPOp arpOpcode -> check (compare flow.arpOpcode arpOpcode) t 
-		| OxmARPSpa arpSpa -> begin
-							   match flow.arpSpa with
-								| None -> check true t
-								| Some x -> check (check_with_mask x arpSpa Int32.logand) t
-							   end
- 		| OxmARPTpa arpTpa -> begin
-							   match flow.arpTpa with
-								| None -> check true t
-								| Some x -> check (check_with_mask x arpTpa Int32.logand) t
-							   end
-		| OxmARPSha arpSha -> begin
-							   match flow.arpSha with
-								| None -> check true t
-								| Some x -> check (check_with_mask x arpSha Int64.logand) t
-							   end
-		| OxmARPTha arpTha -> begin
-							   match flow.arpTha with
-								| None -> check true t
-								| Some x -> check (check_with_mask x arpTha Int64.logand) t
-							   end
-		| OxmICMPType icmpv4Type -> check (compare flow.icmpv4Type icmpv4Type) t
-		| OxmICMPCode icmpv4Code -> check (compare flow.icmpv4Code icmpv4Code) t
-(*		| OxmMPLSLabel of int32
-		| OxmMPLSTc of int8
-		| OxmTunnelId of int64 mask *)
-		| OxmUDPSrc udpSrc -> check (compare flow.udpSrc udpSrc) t
-		| OxmUDPDst udpDts -> check (compare flow.udpDst udpDts) t 
-		| OxmSCTPSrc tcpSrc -> check (compare flow.tcpSrc tcpSrc) t
-		| OxmSCTPDst tcpDst -> check (compare flow.tcpDst tcpDst) t
-(*		| OxmIPv6Src ipv6Src ->  begin
-							   match flow.ipv6Src with
-								| None -> check true t
-								| Some x -> check (check_with_mask128 x ipv6Src) t
-							   end
-		| OxmIPv6Dst of int128 mask *)
-		| OxmIPv6FLabel ipv6flabel -> begin
-							   match flow.ipv6flabel with
-								| None -> check true t
-								| Some x -> check (check_with_mask x ipv6flabel Int32.logand) t
-							   end
-		| OxmICMPv6Type icmpv6Type -> check (compare flow.icmpv6Type icmpv6Type) t
-		| OxmICMPv6Code icmpv6Code -> check (compare flow.icmpv6Code icmpv6Code) t
-(*		| OxmIPv6NDTarget of int128 mask
-		| OxmIPv6NDSll of int48
-		| OxmIPv6NDTll of int48
-		| OxmMPLSBos of bool
-		| OxmPBBIsid of int24 mask
-		| OxmIPv6ExtHdr of oxmIPv6ExtHdr mask
-*)
-*)
+
+
   (* XXX considering that of_match lists are ordered in the same way *)
   let rec check_flow_overlap flow flow_patten =
 	let check_with_mask f f_p logical_and =
@@ -664,6 +411,79 @@ module SoxmMatch = struct
 								check_flow_overlap flow ty
 	(* oxmIPv6ExtHdr? *)
 
+  (* XXX considering that of_match lists are ordered in the same way *)
+  let rec check_flow_del_modify flow flow_patten =
+	let check_with_mask f f_p logical_and =
+	  match f, f_p with (* definition of mask is changed in openflow 1.4.0 *)
+	  | {m_value = v; m_mask = None}, {m_value = v_p; m_mask = None} -> v = v_p
+	  | {m_value = v; m_mask = Some m}, {m_value = v_p; m_mask = Some m_p} -> (* XXX check for del+mod *)
+		  (logical_and v m) = (logical_and v_p m_p)
+	  | _, _ -> false
+	in
+	let check cond tx ty =
+		if cond then check_flow_overlap tx ty else false
+	in
+	match flow, flow_patten with
+	| [], _ | _, [] -> true
+
+	| (OxmInPort x)::tx, (OxmInPort y)::ty
+	| (OxmInPhyPort x)::tx, (OxmInPhyPort y)::ty 
+	| (OxmMPLSLabel x)::tx, (OxmMPLSLabel y)::ty
+		-> check (x = y) tx ty
+	| (OxmEthType x)::tx, (OxmEthType y)::ty
+	| (OxmTCPSrc x)::tx, (OxmTCPSrc y)::ty
+	| (OxmTCPDst x)::tx, (OxmTCPDst y)::ty
+	| (OxmARPOp x)::tx, (OxmARPOp y)::ty
+	| (OxmICMPType x)::tx, (OxmICMPType y)::ty
+	| (OxmICMPCode x)::tx, (OxmICMPCode y)::ty
+	| (OxmMPLSTc x)::tx, (OxmMPLSTc y)::ty
+	| (OxmUDPSrc x)::tx, (OxmUDPSrc y)::ty
+	| (OxmUDPDst x)::tx, (OxmUDPDst y)::ty
+	| (OxmSCTPSrc x)::tx, (OxmSCTPSrc y)::ty
+	| (OxmSCTPDst x)::tx, (OxmSCTPDst y)::ty
+	| (OxmICMPv6Type x)::tx, (OxmICMPv6Type y)::ty
+	| (OxmICMPv6Code x)::tx, (OxmICMPv6Code y)::ty
+		-> check (x = y) tx ty
+	| (OxmEthDst x)::tx, (OxmEthDst y)::ty 
+	| (OxmEthSrc x)::tx, (OxmEthSrc y)::ty 
+	| (OxmARPSha x)::tx, (OxmARPSha y)::ty 
+	| (OxmARPTha x)::tx, (OxmARPTha y)::ty
+	| (OxmTunnelId x)::tx, (OxmTunnelId y)::ty
+		-> check (check_with_mask x y Int64.logand) tx ty
+	| (OxmVlanPcp x)::tx, (OxmVlanPcp y)::ty
+	| (OxmIPProto x)::tx, (OxmIPProto y)::ty
+	| (OxmIPDscp x)::tx, (OxmIPDscp y)::ty
+	| (OxmIPEcn x)::tx, (OxmIPEcn y)::ty
+		-> check (x = y) tx ty
+	| (OxmIP4Src x)::tx, (OxmIP4Src y)::ty 
+	| (OxmIP4Dst x)::tx, (OxmIP4Dst y)::ty 
+	| (OxmARPSpa x)::tx, (OxmARPSpa y)::ty 
+	| (OxmARPTpa x)::tx, (OxmARPTpa y)::ty 
+	| (OxmIPv6FLabel x)::tx, (OxmIPv6FLabel y)::ty 
+	| (OxmPBBIsid x)::tx, (OxmPBBIsid y)::ty 
+		-> check (check_with_mask x y Int32.logand) tx ty
+	| (OxmIPv6NDSll x)::tx, (OxmIPv6NDSll y)::ty
+	| (OxmIPv6NDTll x)::tx, (OxmIPv6NDTll y)::ty
+		-> check (x = y) tx ty
+	| (OxmMPLSBos x)::tx, (OxmMPLSBos y)::ty
+		-> check (x = y) tx ty
+(*	| (OxmVlanVId x)::tx, (OxmVlanVId y)::ty
+		-> false
+	| (OxmIPv6Src x)::tx, (OxmIPv6Src y)::ty
+	| (OxmIPv6Dst x)::tx, (OxmIPv6Dst y)::ty
+		-> false
+	| (OxmIPv6NDTarget x)::tx, (OxmIPv6NDTarget y)::ty
+		-> false *)
+	| ofmx::tx, ofmy::ty -> if (oxm_to_num ofmx) < (oxm_to_num ofmy) then
+								check_flow_overlap tx flow_patten
+							else
+								false (* this is the difference with overlapping.
+										 if entry is less specific than pattern (flow description)
+										 then it should not be deleted.
+									  *)
+	(* oxmIPv6ExtHdr? *)
+
+
 end
 
 module Make(T:TCPV4 (* controller *))(N:NETWORK) = struct
@@ -673,23 +493,6 @@ module Make(T:TCPV4 (* controller *))(N:NETWORK) = struct
   module OSK = Ofsocket0x04.Make(T)
 
   type eth_t = E.t 
-
-(*  type port_stats = {
-	mutable port_id : int16;
-	mutable rx_packets : int64;
-	mutable tx_packets : int64;
-	mutable rx_bytes : int64;
-	mutable tx_bytes : int64;
-	mutable rx_dropped : int64;
-	mutable tx_dropped : int64;
-	mutable rx_errors : int64;
-	mutable tx_errors : int64;
-	mutable rx_frame_err : int64;
-	mutable rx_over_err : int64;
-	mutable rx_crc_err : int64;
-	mutable collisions : int64;
-  }
-*)
 
   type port = {
     port_id: portId;
@@ -704,31 +507,70 @@ module Make(T:TCPV4 (* controller *))(N:NETWORK) = struct
     mutable pkt_count : int;
   }
 
+  let rec is_output_port out_port = 
+	let rec is_output = function
+		| [] -> false
+		| Output (PhysicalPort portId) ::_ when (portId = out_port) -> true
+		| h::t -> is_output t
+	in
+	function 
+	| [] -> false
+	| (ApplyActions h)::t -> if is_output h then true else is_output_port out_port t 
+	| _::t -> is_output_port out_port t
+
+  let rec is_output_group out_group = (* XXX combine it with is_output_port to become one function *)
+	let rec is_output = function
+		| [] -> false
+		| Group groupId ::_ when (groupId = out_group) -> true
+		| h::t -> is_output t
+	in
+	function 
+	| [] -> false
+	| (ApplyActions h)::t -> if is_output h then true else is_output_port out_group t 
+	| _::t -> is_output_port out_group t
+
+
   module Table = struct
+
+	type table_counter = {
+	  mutable n_active: int32;
+	  mutable n_lookups: int64;
+	  mutable n_matches: int64;
+	}
+
 	type t = {
 	  tid: tableId; (* XXX why we have cookie in both table and entry module? Do we need it for Table? *)
 
 	  (* This entry stores wildcard and exact match entries as
 	   * transmitted by the controller *)
 
-	  (* XXX each entry contains a list of header fields. Why we have one per entry here? *)
-	  (* mutable entries: (OfpMatch.t, Entry.t) Hashtbl.t; *)
+	  (* XXX Match fileds (OfpMatch) + priority is unique in table.
+		We keep a list of entries that are different in priority for each OfpMatch.
+		Therefore, entries will have unique OfpMatch *)
+	  (* XXX IMPORTANT: for not to modify a huge bunch of code, I keep table structure 
+		 as before. It has to be fixed later *)
 	  mutable entries: (OfpMatch.t, Entry.t) Hashtbl.t;
 
 	  (* Intermediate table to store exact match flows deriving from wildcard
 	   * entries *)
 
 	  (* XXX each entry contains a list of header fields. Why we have one per entry here? *)
+	  (* XXX IMPORTANT: get rid of cache. No performance enhancement with current structure *)
 	  mutable cache : (OfpMatch.t, Entry.t ref) Hashtbl.t;
 	  (* stats : OP.Stats.table; *) (* removed for now *)
+
+	  mutable counter : table_counter; (* TODO: update it *)
 	}
 
 	let init_table () = 
-		{ tid = 0; entries = (Hashtbl.create 10000); cache = (Hashtbl.create 10000);} (* XXX tid 0 *)
+		{ tid = 0; entries = (Hashtbl.create 10000); cache = (Hashtbl.create 10000);
+		  counter = {n_active = 0l; n_lookups = 0L; n_matches = 0L}
+		} (* XXX tid 0 *)
 
-	(* TODO fix flow_mod flag support. overlap is not considered *)
-	(* XXX st as argument is never used in Table functions *)
-	let add_flow st table (fm : flowMod) verbose =
+
+	(* TODO fix flow_mod flag support. overlap is not considered *)	
+	(* make it compliant with manual p37 *)
+	let add_flow table (fm : flowMod) verbose =
 		(* TODO check if the details are correct e.g. IP type etc. *)
 		let priority =
 		  (* max priority for exact match rules *)
@@ -767,22 +609,12 @@ module Make(T:TCPV4 (* controller *))(N:NETWORK) = struct
 	   * Used when removing a port from the switch control in order to clean related
 	   * flows *)
 
-  let rec is_output_port out_port = 
-	let rec is_output = function
-		| [] -> false
-		| Output (PhysicalPort portId) ::_ when (portId = out_port) -> true
-		| h::t -> is_output t
-	in
-	function 
-	| [] -> false
-	| (ApplyActions h)::t -> if is_output h then true else is_output_port out_port t 
-	| _::t -> is_output_port out_port t
-
-
   let marshal_optional t = match t with (* from OF *)
     | None -> 0xffffl (* OFPP_NONE *)
     | Some x -> PseudoPort.marshal x
 
+
+  (* XXX important TODO: match with p37 of manual after modifying entry data type in the table *)
   let del_flow table ?(xid=(Random.int32 Int32.max_int)) 
         ?(reason=FlowDelete) dflow out_port t verbose =
 
@@ -848,8 +680,6 @@ module Make(T:TCPV4 (* controller *))(N:NETWORK) = struct
 			OSK.send_packet t (Message.marshal xid (FlowRemoved fl_rm))
         | _ -> return ()
     ) remove_flow
-(*
-(*	return *)
 
 
 	(* table stat update methods *)
@@ -864,7 +694,7 @@ module Make(T:TCPV4 (* controller *))(N:NETWORK) = struct
 		table.stats.lookup_count <- Int64.add table.stats.lookup_count 1L
 *)	
 	  (* monitor thread to timeout flows *)
-	let monitor_flow_timeout table t verbose = 
+	let monitor_flow_timeout tables t verbose = 
 	  let open Entry in
 		let check_flow_timeout table t verbose = 
 		  let ts = int_of_float (Clock.time ()) in 
@@ -873,13 +703,19 @@ module Make(T:TCPV4 (* controller *))(N:NETWORK) = struct
 		      let hard = ts - entry.counters.insert_sec in
 		      let idle = ts - entry.counters.last_sec in
 		      match (hard, idle) with 
-		        | (l, _) when ((Timeout.to_int entry.counters.hard_timeout > 0) && 
-		                       (l >= Timeout.to_int entry.counters.hard_timeout)) ->
-		            (of_match, entry, HardTimeout )::ret
-		        | (_, l) when ((Timeout.to_int entry.counters.idle_timeout > 0) &&
-		                       (l >= Timeout.to_int entry.counters.idle_timeout)) ->
-		            ret @ [(of_match, entry, IdleTimeout )]
-		        | _ -> ret 
+		        | (l, _) -> begin
+						match entry.counters.hard_timeout with
+						| ExpiresAfter x when (x > 0 && l >= x) ->
+							(of_match, entry, FlowHardTiemout )::ret
+						| _ -> ret
+						end
+		        | (_, l) -> begin
+						match entry.counters.idle_timeout with
+						| ExpiresAfter x when (x > 0 && l >= x) ->
+							ret @ [(of_match, entry, FlowIdleTimeout )]
+						| _ -> ret
+						end
+		        | _ -> ret
 		  ) table.entries [] in 
 		    Lwt_list.iter_s (
 		      fun (of_match, entry, reason) -> 
@@ -887,10 +723,10 @@ module Make(T:TCPV4 (* controller *))(N:NETWORK) = struct
 		    ) flows
 		in
 		while_lwt true do 
-		  lwt _ = OS.Time.sleep 1.0 in 
-		    check_flow_timeout table t verbose 
+		  lwt _ = OS.Time.sleep 1.0 in
+			Lwt_list.iter_s (fun tbl -> check_flow_timeout tbl t verbose) tables
 		done 
-*)
+
 	end
   (* end of module table *)
 
@@ -934,7 +770,7 @@ module Make(T:TCPV4 (* controller *))(N:NETWORK) = struct
          Found of Entry.t ref
        | NOT_FOUND
 
-  type t' = {
+  type t = {
     (* Mapping Netif objects to ports *) (* XXX each port has Netif record, do we need it here anymore? *)
     (* mutable dev_to_port: (Net.Manager.id, port ref) Hashtbl.t; *)
     (* Mapping port ids to port numbers *)
@@ -1023,7 +859,7 @@ module Make(T:TCPV4 (* controller *))(N:NETWORK) = struct
     update_port_tx_stats (Int64.of_int (Cstruct.len bits)) port;
     return (port.out_push (Some bits))
 
-  let forward_frame (st : t') (* it has controller *) in_port bits checksum port (* output port *)
+  let forward_frame (st : t) (* it has controller *) in_port bits checksum port (* output port *)
 			table cookie of_match = 
 	let open SoxmMatch in
     let _ = (* XXX check *)
@@ -1167,10 +1003,10 @@ module Make(T:TCPV4 (* controller *))(N:NETWORK) = struct
   (* Assume that action are valid. I will not get a flow that sets an ip
    * address unless it defines that the ethType is ip. Need to enforce
    * these rule in the parsing process of the flow_mod packets *)
-  let apply_of_actions (st : t') in_port bits (actions : action list)
+  let apply_of_actions (st : t) in_port bits (actions : action list) 
 			table cookie of_match =
 	let open SoxmMatch in
-    let apply_of_actions_inner (st : t') in_port bits checksum action =
+    let apply_of_actions_inner (st : t) in_port bits checksum action =
       try_lwt
         match action with
         | Output port ->
@@ -1189,13 +1025,43 @@ module Make(T:TCPV4 (* controller *))(N:NETWORK) = struct
                      (Printexc.to_string exn )) in
         return checksum 
     in
-    let rec apply_of_actions_rec (st : t') in_port bits checksum = function
+    let rec apply_of_actions_rec (st : t) in_port bits checksum = function
       | [] -> return false
       | head :: actions -> 
         lwt checksum = apply_of_actions_inner st in_port bits checksum head in
         apply_of_actions_rec st in_port bits checksum actions 
     in 
     lwt _ = apply_of_actions_rec st in_port bits false actions in 
+    return ()
+
+  let apply_of_instructions (st : t) in_port bits (instructions : instruction list)  
+			table cookie of_match =
+	let open SoxmMatch in
+    let apply_of_instructions_inner (st : t) in_port bits checksum instruction =
+      try_lwt
+        match instruction with
+		(* | GotoTable tid *)
+		| ApplyActions acts -> apply_of_actions st in_port bits acts table cookie of_match;
+		(*| WriteActions of actionSequence
+		| WriteMetadata of int64 mask
+		| Clear
+		| Meter of int32
+		| Experimenter of int32 *)
+		| instr ->
+     	  	return (pp "[switch] apply_of_instructions: Unsupported set-fields %s" 
+                       		(Instruction.to_string instr))
+      with exn -> 
+        return (pp  "[switch] apply_of_instructions: (packet size %d) %s %s\n%!" 
+                     (Cstruct.len bits) (Instruction.to_string instruction) 
+                     (Printexc.to_string exn ))
+    in
+    let rec apply_of_instructions_rec (st : t) in_port bits checksum = function
+      | [] -> return false
+      | head :: instructions -> 
+        lwt _ = apply_of_instructions_inner st in_port bits checksum head in (* TODO checksum? *)
+        apply_of_instructions_rec st in_port bits checksum instructions 
+    in 
+    lwt _ = apply_of_instructions_rec st in_port bits false instructions in 
     return ()
 
 
@@ -1253,7 +1119,7 @@ module Make(T:TCPV4 (* controller *))(N:NETWORK) = struct
 	verbose; pkt_len=1500;}
 
 (* add port to the switch *) 
-  let add_port ?(use_mac=false) (sw : t') ethif = 
+  let add_port ?(use_mac=false) (sw : t) ethif = 
 
 	sw.portnum <- Int32.add sw.portnum 1l;
 	let hw_addr =  Macaddr.to_string (E.mac ethif) in
@@ -1276,35 +1142,68 @@ module Make(T:TCPV4 (* controller *))(N:NETWORK) = struct
 		| Some t -> OSK.send_packet t 
 			(Message.marshal (Random.int32 Int32.max_int) (PortStatusMsg {reason = PortAdd; desc = port.phy}))
   
-  let get_flow_stats (table : Table.t) (of_match : OfpMatch.t) out_port out_grp cookie =
-	let match_flows of_match key value ret =
-	  if (SoxmMatch.check_flow_overlap key of_match && 
+  let get_flow_stats (table : Table.t) (dflow : OfpMatch.t) out_port out_grp cookie =
+	let match_flows of_match flow ret =
+	  if (SoxmMatch.check_flow_overlap of_match dflow && 
 		  ( (out_port = 0xffffl (* OFPP_ANY *)) || 
-			(is_output_port out_port flow.Entry.instructions) )
+			(is_output_port out_port flow.Entry.instructions)
 		  ) &&
 		  ( (out_grp = 0xffffffffl (* OFPG_ANY *)) || 
-			(is_output_group out_grp flow.Entry.instructions) )
+			(is_output_group out_grp flow.Entry.instructions)
 		  ) &&
-		  ( (out_grp = 0xffffffffl (* OFPG_ANY *)) || 
-			(is_output_group out_grp flow.Entry.instructions) )
+		  ( let fcookie = flow.Entry.counters.cookie in
+			(cookie.m_mask = Some 0L (* no restriction - manual 7.3.5.2 *)) || 
+			(fcookie.m_mask = Some 0L (* XXX no restriction on flow cookie *)) || 
+			( match fcookie.m_mask, cookie.m_mask with
+			  | None, None -> fcookie.m_value = cookie.m_value
+			  | Some fm, Some m -> 
+				  (Int64.logand fcookie.m_value fm) = (Int64.logand cookie.m_value m)
+			  | _, _ -> false (* XXX Important, it is wrong, figure the right tech *)
+			)
 		  ) 
 		 ) then ( 
-	  (Entry.flow_counters_to_flow_stats key (1) value)::ret  (* XXX table id? *)
+	  (Entry.flow_counters_to_flow_stats of_match (1) flow)::ret  (* XXX check (1)? *)
 	  ) else 
         ret 
 	in
-	  Hashtbl.fold (fun key value r -> match_flows of_match key value r) 
-	  table.Table.entries []  
-
-          if ((SoxmMatch.check_flow_overlap of_match dflow) && 
-              ((port_num = 0xffffl) ||  
-               (is_output_port port_num flow.Entry.instructions))) then ( 
+	  Hashtbl.fold (fun of_match flow ret -> match_flows of_match flow ret) 
+	  table.entries []  
 
 
+  let get_aggr_stats (tables : Table.t list) (dflow : OfpMatch.t) out_port out_grp cookie =
+	let match_flows of_match flow (fl_b, fl_p, fl) =
+	  if (SoxmMatch.check_flow_overlap of_match dflow && 
+		  ( (out_port = 0xffffl (* OFPP_ANY *)) || 
+			(is_output_port out_port flow.Entry.instructions)
+		  ) &&
+		  ( (out_grp = 0xffffffffl (* OFPG_ANY *)) || 
+			(is_output_group out_grp flow.Entry.instructions)
+		  ) &&
+		  ( let fcookie = flow.Entry.counters.cookie in
+			(cookie.m_mask = Some 0L (* no restriction - manual 7.3.5.2 *)) || 
+			(fcookie.m_mask = Some 0L (* XXX no restriction on flow cookie *)) || 
+			( match fcookie.m_mask, cookie.m_mask with
+			  | None, None -> fcookie.m_value = cookie.m_value
+			  | Some fm, Some m -> 
+				  (Int64.logand fcookie.m_value fm) = (Int64.logand cookie.m_value m)
+			  | _, _ -> false (* XXX Important, it is wrong, figure the right tech *)
+			)
+		  ) 
+		 )
+	  then (Int64.add fl_b flow.counters.n_bytes, Int64.add fl_p flow.counters.n_packets, Int32.succ fl)
+	  else (fl_b, fl_p, fl)
+	in
+	  let rec get_aggr_stats_r tables aggr =
+		match tables with
+		| [] -> aggr
+		| h::t -> let r = 
+			Hashtbl.fold (fun of_match flow ret -> match_flows of_match flow ret) h.Table.entries aggr in  
+			get_aggr_stats_r t r
+	  in
+		get_aggr_stats_r tables (0L, 0L, 0l)
 
 
-
-let process_buffer_id (st : t') t msg xid buffer_id actions = (* XXX important: check functionality *)
+let process_buffer_id (st : t) t msg xid buffer_id actions = (* XXX important: check functionality *)
   let pkt_in = ref None in
 
   let _ = 
@@ -1319,17 +1218,17 @@ let process_buffer_id (st : t') t msg xid buffer_id actions = (* XXX important: 
 			) st.packet_buffer in 
 			  match (!pkt_in) with 
 				| None ->
-					pp "[switch**] invalid buffer id %ld\n%!" buffer_id; 
+					pp "[switch] invalid buffer id %ld\n%!" buffer_id; 
 					OSK.send_packet t (Message.marshal xid (Error {err = BadRequest ReqBufferUnknown; data = msg}))
 				| Some (pkt_in) ->
 					apply_of_actions st (None (* Some pkt_in.port *)) msg actions
 						pkt_in.pi_table_id pkt_in.pi_cookie pkt_in.pi_ofp_match
 						(* XXX check: pkt_in.data or msg? *)
 	
-let process_openflow (st : t') t (xid, msg) =
+let process_openflow (st : t) t (xid, msg) =
   let open Message in
 
-  let _ = if st.verbose then pp "[switch*] %s\n%!" (Message.to_string msg) in
+  let _ = if st.verbose then pp "[switch] %s\n%!" (Message.to_string msg) in
 
   match msg with
 	| Hello buf -> return ()
@@ -1358,6 +1257,7 @@ let process_openflow (st : t') t (xid, msg) =
 				{ fr_table_id = table_id; fr_out_port = port
 				; fr_out_group = gport; fr_cookie = fcookie
 				; fr_match = of_match} ->
+			begin
 			  let rec add_flow_stats tables =
 				match tables with
 				| [] -> []
@@ -1368,27 +1268,75 @@ let process_openflow (st : t') t (xid, msg) =
 				  match table_id with
 		 		  | 0xff -> st.table (* OFPTT_ALL *)
 				  | t -> 
-					  [ List.find (fun x -> x.Table.tid = t) st.table ]
+					  [ List.find (fun x -> x.Table.tid = t) st.table ] (* single table *)
 			  	in
-				  let flows = { mpreply_typ = FlowStatsReply (add_flow_stats table_list)
+				let fls = add_flow_stats table_list in
+				  lwt flows = 
+					Lwt_list. fold_right_s (
+					  fun fl flows ->
+						let reply = { mpreply_typ = FlowStatsReply (fl::flows)
+							  		; mpreply_flags = true} in 
+						let fl_sz = MultipartReply.sizeof reply in
+						  if (OpenFlow_Header.size + fl_sz > 0xffff (* 64KB limit *)) then 
+						  	let rep = { mpreply_typ = FlowStatsReply flows
+							  		  ; mpreply_flags = true} in (* more reply will come *)
+				  			let _ = OSK.send_packet t (Message.marshal xid (MultipartReply rep)) in
+						    return [fl]
+						  else
+						    return (fl::flows) )
+					fls [] 
+					in
+					let rep = { mpreply_typ = FlowStatsReply flows
 							  ; mpreply_flags = false} in
-				  OSK.send_packet t (Message.marshal xid (MultipartReply flows))
+					OSK.send_packet t (Message.marshal xid (MultipartReply rep))
 
 			  with Not_found ->
 				pp "[switch] invalid table id (%d) in flow stats request\n%!" table_id;
 				OSK.send_packet t (Message.marshal xid (Error { err = BadRequest ReqBadTableId
 															  ; data = Cstruct.create 0}))
+			end
 
-(*
-		  | PortStatsReq port ->
+		  | AggregFlowStatsReq
+				{ fr_table_id = table_id; fr_out_port = port
+				; fr_out_group = gport; fr_cookie = fcookie
+				; fr_match = of_match} ->
+			begin
+			  try
+			  	let table_list =
+				  match table_id with
+		 		  | 0xff -> st.table (* OFPTT_ALL *)
+				  | t -> 
+					  [ List.find (fun x -> x.Table.tid = t) st.table ] (* single table *)
+			  	in
+				  let (byte_count, packet_count, flow_count) = 
+					get_aggr_stats table_list of_match port gport fcookie in
+				  let stats = { packet_count; byte_count; flow_count} in
+				  let rep = { mpreply_typ = AggregateReply stats
+							; mpreply_flags = false} in
+				  OSK.send_packet t (Message.marshal xid (MultipartReply rep))
+
+			  with Not_found ->
+				pp "[switch] invalid table id (%d) in flow stats request\n%!" table_id;
+				OSK.send_packet t (Message.marshal xid (Error { err = BadRequest ReqBadTableId
+															  ; data = Cstruct.create 0}))
+			end
+
+		  | TableStatsReq -> (* XXX 64KB restriction required? *)
+				let tstats = List.map (fun t -> 
+					{ table_id = t.Table.tid
+					; active_count = t.Table.counter.n_active
+					; lookup_count = t.Table.counter.n_lookups
+					; matched_count = t.Table.counter.n_matches}) st.table in
+				let rep = { mpreply_typ = TableReply tstats
+						  ; mpreply_flags = false} in
+				OSK.send_packet t (Message.marshal xid (MultipartReply rep))
+				
+		  | PortStatsReq port -> (* XXX 64KB restriction required? *)
 			let stats = PortStatsReply (List.map (fun x -> x.counter) st.ports) in
-			let rep = {mpreply_typ = stats; mpreply_flags = false} in (* XXX check flag *)
+			let rep = {mpreply_typ = stats; mpreply_flags = false} in
  			  OSK.send_packet t (Message.marshal xid (MultipartReply rep)) 
-*)
-(*
-		  | AggregFlowStatsReq of flowRequest
-		  | TableStatsReq
-		  | PortStatsReq of portId
+
+(* XXX TODO ...
 		  | QueueStatsReq of queueRequest
 		  | GroupStatsReq of int32
 		  | GroupDescReq
@@ -1399,121 +1347,60 @@ let process_openflow (st : t') t (xid, msg) =
 		  | TableFeatReq of (tableFeatures list) option
 		  | ExperimentReq of experimenter  
 *)
-	end
-(*
-	| StatsRequestMsg req -> begin
-		match req with
-		  | DescriptionRequest ->
-			let p = DescriptionRep 
-						{ manufacturer = "Mirage"
-						; hardware = "Mirage"
-						; software = "Mirage"
-						; serial_number = "0.1"
-						; datapath = "Mirage" } in 
- 			  OSK.send_packet t (Message.marshal xid (StatsReplyMsg p)) 
-	(*	  | FlowTableStatsRequest ->  (* XXX important: no specific reply is defined in frenetic *)
-			  let p = IndividualFlowRep [st.table.Table.stats] in 
-				OSK.send_packet t (Message.marshal xid (StatsReplyMsg p)) *)
-				 
-		  | IndividualRequest sreq -> (* (req_h, of_match, table_id, out_port) *)
-			  (*TODO Need to consider the  table_id and the out_port and 
-			   * split reply over multiple openflow packets if they don't
-			   * fit a single packet. *)
-			  let flows = get_flow_stats st sreq.is_of_match in (* XXX check the change *)
-			(* (* XXX size restriction removed. check *)
-			  let stats = OP.Stats.({st_ty=FLOW; more=true;}) in 
-			  lwt (_, flows) = 
-				Lwt_list.fold_right_s (
-				  fun fl (sz, flows) ->
-				    let fl_sz = OP.Flow.flow_stats_len fl in 
-				      if (sz + fl_sz > 0xffff) then 
-				        let r = OP.Stats.Flow_resp(stats, flows) in
-				        let h = OP.Header.create ~xid STATS_RESP (OP.Stats.resp_get_len r) in 
-				        lwt _ = OSK.send_packet t (OP.Stats_resp (h, r)) in
-					        return ((OP.Header.get_len + OP.Stats.get_resp_hdr_size + fl_sz), [fl])
-				      else
-				        return ((sz + fl_sz), (fl::flows)) )
-				  flows ((OP.Header.get_len + OP.Stats.get_resp_hdr_size), []) in *)
-(* 
-			  let stats = OP.Stats.({st_ty=FLOW; more=false;}) in 
-			  let r = OP.Stats.Flow_resp(stats, flows) in
-			  let h = OP.Header.create ~xid STATS_RESP (OP.Stats.resp_get_len r) in
-			  OSK.send_packet t (OP.Stats_resp (h, r)) *)
-			  OSK.send_packet t (Message.marshal xid (StatsReplyMsg (IndividualFlowRep flows)))
-			  
-		  | AggregateRequest areq -> 
-			  let match_flows_aggr of_match key value (fl_b, fl_p, fl) =
-				let open Entry in
-				if (SMatch.flow_match_compare key of_match) then (* XXX get_flow_stats? *)
-				  ((Int64.add fl_b value.counters.n_bytes), (Int64.add fl_p
-				  value.counters.n_packets), (Int32.succ fl))
-				else (fl_b, fl_p, fl) in 
-			  let (byte_count, packet_count,flow_count) = 
-				Hashtbl.fold (match_flows_aggr areq.as_of_match) 
-					st.table.Table.entries (0L, 0L, 0l) in
-					OSK.send_packet t (Message.marshal xid (StatsReplyMsg (AggregateFlowRep 
-					  {total_byte_count = byte_count; total_packet_count = packet_count;flow_count;})))
-(*
-		  | OP.Stats.Port_req(req_h, port) -> begin
-			   match port with
-			   | OP.Port.No_port -> 
-				 let port_stats = List.map (fun p -> p.counter) st.ports in
-				 let stats = OP.Stats.({st_ty=PORT; more=false;}) in 
-				 let r = OP.Stats.Port_resp(stats, port_stats) in 
-				 let h = OP.Header.create ~xid OP.Header.STATS_RESP (OP.Stats.resp_get_len r) in 
-				 OSK.send_packet t (OP.Stats_resp (h, r)) 
-			   | OP.Port.Port(port_id) -> begin
-				   try_lwt 
-				    let port = Hashtbl.find st.int_to_port port_id in
-				    let stats = OP.Stats.({st_ty=PORT; more=false;}) in 
-				    let r = OP.Stats.Port_resp(stats, [(!port).counter]) in 
-				    let h = create ~xid STATS_RESP (OP.Stats.resp_get_len r) in 
-				    OSK.send_packet t (OP.Stats_resp (h, r))
-				   with Not_found ->
-				  (* TODO reply with right error code *)
-				      pp "[switch] unregistered port %s\n%!"(OP.Port.string_of_port port);
-				      let h = create ~xid ERROR (OP.Header.get_len + 4) in 
-				      OSK.send_packet t (OP.Error (h, OP.ACTION_BAD_OUT_PORT, (get_new_buffer 0)))
-				  end 
-			  | _ -> 
-          		pp "[switch] unsupported stats request\n%!";
-				let h = create ~xid ERROR (get_len + 4) in 
-				OSK.send_packet t OP.(Error (h, ACTION_BAD_OUT_PORT, (marshal msg))) 
-		  end *)
-		  | _ ->
-			OSK.send_packet t (Message.marshal xid (ErrorMsg (Error (Error.BadRequest BadSubType, Cstruct.create 0))))
-	end 
+		| _ -> 
+			OSK.send_packet t (Message.marshal xid (Error { err = BadRequest ReqBadMultipart
+														  ; data = Cstruct.create 0}))
+	end (* MultipartReq *)
 
-  | ConfigRequestMsg ->
-		OSK.send_packet t (Message.marshal xid (ConfigReplyMsg { frag_flags = FragNormal; miss_send_len = st.pkt_len}))
+  | FlowModMsg fm -> (* XXX Careful revision of add/mod/strict *)
+      lwt _ = 
+        match fm.mfCommand with
+          | AddFlow | ModFlow | ModStrictFlow ->
+			begin
+			try
+			  let table = List.find (fun x -> x.Table.tid = fm.mfTable_id) st.table in
+				Table.add_flow table fm st.verbose
+			with Not_found ->
+			  pp "[switch] invalid table id (%d) in flow mod (add/mod) request\n%!" fm.mfTable_id;
+			  OSK.send_packet t (Message.marshal xid (Error { err = BadRequest ReqBadTableId
+															  ; data = Cstruct.create 0}))
+			end
+ 
+          | DeleteFlow | DeleteStrictFlow -> (* XXX Careful revision of del/strict *)
+            (* Need to implemente strict deletion in order to enable signpost
+             * switching *)
+			begin
+			try
+			  let table = List.find (fun x -> x.Table.tid = fm.mfTable_id) st.table in
+				Table.del_flow table fm.mfOfp_match fm.mfOut_port (Some t) st.verbose
+			with Not_found ->
+			  pp "[switch] invalid table id (%d) in flow mod (add/mod) request\n%!" fm.mfTable_id;
+			  OSK.send_packet t (Message.marshal xid (Error { err = BadRequest ReqBadTableId
+															  ; data = Cstruct.create 0}))
+			end
+	  in
+		return ()
+
+
+  | GetConfigRequestMsg ->
+		OSK.send_packet t (Message.marshal xid (GetConfigReplyMsg { flags = NormalFrag; miss_send_len = st.pkt_len}))
 			(* XXX check it *)
 
   | BarrierRequest ->
 	  OSK.send_packet t (Message.marshal xid (BarrierReply))
 
-  | PacketOutMsg pkt ->
+  | PacketOutMsg pkt -> 
 	begin
-	  match pkt.output_payload with 
-		| NotBuffered p -> apply_of_actions st pkt.port_id p pkt.apply_actions (* pkt.port_id : portId option *)
-		| Buffered (n, p) -> process_buffer_id st t p xid n pkt.apply_actions 
-	end
+	  match pkt.po_payload with 
+		| NotBuffered p -> apply_of_actions st pkt.po_port_id p pkt.po_actions 0 0L []
+		| Buffered (n, p) -> process_buffer_id st t p xid n pkt.po_actions 
+	end 
 
-  | FlowModMsg fm ->
-      lwt _ = 
-        match fm.command with
-          | AddFlow | ModFlow | ModStrictFlow -> 
-            Table.add_flow st st.table fm st.verbose
-          | DeleteFlow | DeleteStrictFlow ->
-            (* Need to implemente strict deletion in order to enable signpost
-             * switching *)
-            Table.del_flow st.table fm.pattern fm.out_port (Some t) st.verbose 
-	  in
-		return ()
-
-  | SetConfig msg -> 
+  | SetConfigMsg msg -> 
           (* use miss_send_len when sending a pkt_in message*)
           let _ = st.pkt_len <- msg.miss_send_len in
           return ()
+(* XXX TODO *)
 (*
   | BarrierReply
   | StatsReplyMsg _
@@ -1526,29 +1413,27 @@ let process_openflow (st : t') t (xid, msg) =
   | ErrorMsg _ ->
 *)
   | _ ->
-	  OSK.send_packet t (Message.marshal xid (ErrorMsg (Error (Error.BadRequest BadType, Cstruct.create 0))))
-*)
+	  OSK.send_packet t (Message.marshal xid (Error {err = BadRequest ReqBadType; data = Cstruct.create 0}))
+
 (* end of process_openflow *)
 
 (*************************************************
  * Switch OpenFlow control channel 
  *************************************************)
-(*
-  let monitor_control_channel (sw : t') conn =
+
+  let monitor_control_channel (sw : t) conn =
 	let is_active = ref true in 
   	while_lwt !is_active do
       let _ = sw.echo_resp_received <- false in 
       let _ = sw.last_echo_req <- (Clock.time ()) in 
-      lwt _ = OSK.send_packet conn (Message.marshal 1l (EchoRequest (Cstruct.create 0))) in
+      lwt _ = OSK.send_packet conn (Message.marshal 1l (EchoRequest (Cstruct.create 0))) in (* XXX check xid *)
 		lwt _ = OS.Time.sleep 10.0 in 
 		return (is_active := sw.echo_resp_received) 
 	done 
 
-  let control_channel_run (st : t') conn = 
+  let control_channel_run (st : t) conn = 
 	(* Trigger the dance between the 2 nodes *)
-	(*let h = OP.Header.(create ~xid:1l HELLO sizeof_ofp_header) in  
-	let _ = OSK.send_packet conn (OP.Hello(h)) in *)
-	let _ = OSK.send_packet conn (Message.marshal 1l (Hello (Cstruct.create 0))) in
+	let _ = OSK.send_packet conn (Message.marshal 1l (Hello [VersionBitMap [0x10]])) in (* XXX check xid *)
 
 	let rec echo () =
 	  try_lwt
@@ -1574,24 +1459,26 @@ let process_openflow (st : t') t (xid, msg) =
    *********************************************)
 
 (* in checking progress ... *)
-  let process_frame_inner (st : t') (p : port) frame =
+  let process_frame_inner (st : t) (p : port) frame =
   	try_lwt
       let in_port = p.port_id in 
-      let tupple = (SMatch.raw_packet_to_match in_port frame)  in 
+      let of_match = (SoxmMatch.raw_packet_to_match in_port frame)  in 
 	  (* Update port rx statistics *)
 	  let _ = update_port_rx_stats (Int64.of_int (Cstruct.len frame)) p in
 
 	  (* Lookup packet flow to existing flows in table *)
-		match  (lookup_flow st tupple) with 
+		match  (lookup_flow (List.hd st.table) of_match) with (* XXX TODO *)
 		  | NOT_FOUND -> begin
 			  (* Table.update_table_missed st.table; *) (* XXX check, do we need it? *)
 			  let buffer_id = st.packet_buffer_id in
 			  (*TODO Move this code in the Switch module *)
 			  st.packet_buffer_id <- Int32.add st.packet_buffer_id 1l; (*XXX check what is this *)
-			  let pkt_in = ({ input_payload = Buffered (buffer_id, frame)
-							; total_len = Cstruct.len frame
-							; port = in_port
-							; reason = NoMatch
+			  let pkt_in = ({ pi_total_len = Cstruct.len frame
+							; pi_reason = NoMatch
+							; pi_table_id = (List.hd st.table).tid
+							; pi_cookie = -1L
+							; pi_ofp_match = of_match
+							; pi_payload = Buffered (buffer_id, frame)
 							}) in
 			  st.packet_buffer <- pkt_in::st.packet_buffer; 
 
@@ -1599,10 +1486,12 @@ let process_openflow (st : t') t (xid, msg) =
 			  let size =
 				if (Cstruct.len frame > 92) then 92
 				else Cstruct.len frame in
-				  let pkt_in = ({ input_payload = Buffered (buffer_id, Cstruct.sub frame 0 size)
-							; total_len = Cstruct.len frame
-							; port = in_port
-							; reason = NoMatch
+				  let pkt_in = ({ pi_total_len = Cstruct.len frame
+							; pi_reason = NoMatch
+							; pi_table_id = (List.hd st.table).tid
+							; pi_cookie = -1L
+							; pi_ofp_match = of_match
+							; pi_payload = Buffered (buffer_id, Cstruct.sub frame 0 size)
 							}) in				  
 					return (
 					  match st.controller with
@@ -1617,15 +1506,17 @@ let process_openflow (st : t') t (xid, msg) =
 			let _ = print_endline "entry found..." in
 			(* let _ = Table.update_table_found st.table in *)
 			let _ = Entry.update_flow (Int64.of_int (Cstruct.len frame)) !entry in
-			apply_of_actions st tupple.inPort frame (!entry).Entry.actions
-	  
+			  apply_of_instructions st (Some in_port) frame (!entry).Entry.instructions
+				(List.hd st.table).Table.tid (!entry).Entry.counters.cookie.m_value of_match
+					(* TODO: list of tables *)
+				 	(* XXX cookie? *)
 	  with exn ->
 		return (pp "[switch] process_frame_inner: control channel error: %s\n" 
         	(Printexc.to_string exn))
 
 
-  (* Swicth operation *)
-  let forward_thread (st : t') =
+  (* Swicth port operation *)
+  let forward_thread (st : t) =
 	Lwt_list.iter_p (fun (p : port) -> 
 	  while_lwt true do
         lwt _ = Lwt_stream.next p.in_queue >>= process_frame_inner st p in
@@ -1658,7 +1549,8 @@ let process_openflow (st : t') t (xid, msg) =
 				  | Some t -> return t 
 			with exn -> connect_socket ()
 		in
-		  let sw = init_switch_info 0x100L (* model *) in (* XXX move "verbose" and "dpid" to the unikernel *)
+		  let sw = init_switch_info 0x100L (* model *) in
+			(* TODO1: move "verbose" and "dpid" to the unikernel. Check if to choose a rand for dpid *)
 		  lwt _ = add_switch_ports sw ethlist in
 		  connect_socket ()
 			>>= fun fl -> 
@@ -1669,6 +1561,6 @@ let process_openflow (st : t') t (xid, msg) =
 		  			let _ = OSK.close conn in 
       				  return (pp "[switch] Disconnected from remote controller.\n")
 
-*)
+
 end (* end of Switch module *)
 
