@@ -1210,7 +1210,7 @@ let process_buffer_id (st : t) t msg xid buffer_id actions = (* XXX important: c
 	st.packet_buffer <- (* Do we need to keep this big list? Also, pkt_in is the last one in the buffer?! *)
       List.filter ( fun a -> 
 		match a.pi_payload with
-		| NotBuffered p -> true (* XXX what we can do? *)
+		| NotBuffered p -> true (* XXX WRONG: all elements of packet_buffer are buffered! *)
 		| Buffered (n, p) -> 
 			if (n = buffer_id) then
     	  		(pkt_in := Some (a); false )
@@ -1461,28 +1461,30 @@ let process_openflow (st : t) t (xid, msg) =
 (* in checking progress ... *)
   let process_frame_inner (st : t) (p : port) frame =
   	try_lwt
-      let in_port = p.port_id in 
-      let of_match = (SoxmMatch.raw_packet_to_match in_port frame)  in 
+      let port_id = p.port_id in 
+      let frame_match = (SoxmMatch.raw_packet_to_match port_id frame)  in 
+
 	  (* Update port rx statistics *)
 	  let _ = update_port_rx_stats (Int64.of_int (Cstruct.len frame)) p in
 
 	  (* Lookup packet flow to existing flows in table *)
-		match  (lookup_flow (List.hd st.table) of_match) with (* XXX TODO *)
+		match  (lookup_flow (List.hd st.table) frame_match) with (* XXX TODO *)
 		  | NOT_FOUND -> begin
 			  (* Table.update_table_missed st.table; *) (* XXX check, do we need it? *)
 			  let buffer_id = st.packet_buffer_id in
 			  (*TODO Move this code in the Switch module *)
-			  st.packet_buffer_id <- Int32.add st.packet_buffer_id 1l; (*XXX check what is this *)
+			  st.packet_buffer_id <- Int32.add st.packet_buffer_id 1l;
+			  (*XXX what happens if packet_buffer_id overloads? *)
 			  let pkt_in = ({ pi_total_len = Cstruct.len frame
 							; pi_reason = NoMatch
 							; pi_table_id = (List.hd st.table).tid
 							; pi_cookie = -1L
-							; pi_ofp_match = of_match
+							; pi_ofp_match = frame_match
 							; pi_payload = Buffered (buffer_id, frame)
 							}) in
 			  st.packet_buffer <- pkt_in::st.packet_buffer; 
 
-			  (* Disable for now packet trimming for buffered packets *)
+			  (* XXX Disable for now packet trimming for buffered packets! *)
 			  let size =
 				if (Cstruct.len frame > 92) then 92
 				else Cstruct.len frame in
@@ -1490,7 +1492,7 @@ let process_openflow (st : t) t (xid, msg) =
 							; pi_reason = NoMatch
 							; pi_table_id = (List.hd st.table).tid
 							; pi_cookie = -1L
-							; pi_ofp_match = of_match
+							; pi_ofp_match = frame_match
 							; pi_payload = Buffered (buffer_id, Cstruct.sub frame 0 size)
 							}) in				  
 					return (
@@ -1506,8 +1508,8 @@ let process_openflow (st : t) t (xid, msg) =
 			let _ = print_endline "entry found..." in
 			(* let _ = Table.update_table_found st.table in *)
 			let _ = Entry.update_flow (Int64.of_int (Cstruct.len frame)) !entry in
-			  apply_of_instructions st (Some in_port) frame (!entry).Entry.instructions
-				(List.hd st.table).Table.tid (!entry).Entry.counters.cookie.m_value of_match
+			  apply_of_instructions st (Some port_id) frame (!entry).Entry.instructions
+				(List.hd st.table).Table.tid (!entry).Entry.counters.cookie.m_value frame_match
 					(* TODO: list of tables *)
 				 	(* XXX cookie? *)
 	  with exn ->
@@ -1515,7 +1517,7 @@ let process_openflow (st : t) t (xid, msg) =
         	(Printexc.to_string exn))
 
 
-  (* Swicth port operation *)
+  (* Swicth port input/output operation *)
   let forward_thread (st : t) =
 	Lwt_list.iter_p (fun (p : port) -> 
 	  while_lwt true do
@@ -1535,31 +1537,32 @@ let process_openflow (st : t) t (xid, msg) =
 	  | [] -> return ()
 	  | eth::t -> add_port sw eth >> add_switch_ports sw t
 
+
   let create_switch tcp cont ethlist =
-		let rec connect_socket () =
-		  let sock = ref None in 
-			try_lwt
-			  let _ = pp "connecting to the remote controller...\n%!" in 
-			  	lwt _ = Lwt.pick
-				    [create_tcp_connection tcp cont >>= (fun t -> return (sock:= Some t));
-				     (OS.Time.sleep 10.0)]
-				  in
-				  match !sock with
-				  | None -> connect_socket ()
-				  | Some t -> return t 
-			with exn -> connect_socket ()
-		in
-		  let sw = init_switch_info 0x100L (* model *) in
-			(* TODO1: move "verbose" and "dpid" to the unikernel. Check if to choose a rand for dpid *)
-		  lwt _ = add_switch_ports sw ethlist in
-		  connect_socket ()
-			>>= fun fl -> 
-				let conn = OSK.init_socket_conn_state (OSK.create fl)
-				  in (* up to here, connection in stablished correctly *) 
-					let _ = sw.controller <- (Some conn) in 
-					lwt _ = ((control_channel_run sw conn) <&> (forward_thread sw) ) in 
-		  			let _ = OSK.close conn in 
-      				  return (pp "[switch] Disconnected from remote controller.\n")
+	let rec connect_socket () =
+	  let sock = ref None in 
+		try_lwt
+		  let _ = pp "connecting to the remote controller...\n%!" in 
+			lwt _ = Lwt.pick
+			    [create_tcp_connection tcp cont >>= (fun t -> return (sock:= Some t));
+			     (OS.Time.sleep 10.0)]
+		  in
+			match !sock with
+			| None -> connect_socket ()
+			| Some t -> return t 
+		with exn -> connect_socket ()
+	in
+	  let sw = init_switch_info 0x100L (* model *) in
+		(* TODO1: move 'verbose' and 'dpid' to the unikernel. Check if to choose a rand for dpid *)
+		lwt _ = add_switch_ports sw ethlist in
+		connect_socket ()
+		>>= fun fl -> 
+			let conn = OSK.init_socket_conn_state (OSK.create fl)
+			  in
+				let _ = sw.controller <- (Some conn) in 
+				lwt _ = ((control_channel_run sw conn) <&> (forward_thread sw) ) in 
+				let _ = OSK.close conn in 
+      			  return (pp "[switch] Disconnected from remote controller.\n")
 
 
 end (* end of Switch module *)
