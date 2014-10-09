@@ -41,6 +41,10 @@ type cookie = int64
 
 let resolve t = Lwt.on_success t (fun _ -> ())
 
+let cnt = ref 0
+let cnt' = ref 0
+let hello_sent = ref false
+
 let get_new_buffer len = 
   let buf = Io_page.to_cstruct (Io_page.get 1) in 
     Cstruct.sub buf 0 len 
@@ -767,7 +771,7 @@ module Make(T:TCPV4 (* controller *))(N:NETWORK) = struct
   }
 
   type lookup_ret = 
-         Found of Entry.t ref
+       | Found of OfpMatch.t * (Entry.t ref)
        | NOT_FOUND
 
   type t = {
@@ -784,7 +788,7 @@ module Make(T:TCPV4 (* controller *))(N:NETWORK) = struct
     mutable errornum : int32;
     mutable portnum : int32;
     mutable features' : SwitchFeatures.t;
-    mutable packet_buffer: PacketIn.t list; (* OP.Packet_in.t list; *)
+    mutable packet_buffer: (int32 * bytes) list; (* to store frames *)
     mutable packet_buffer_id: int32;
     ready : unit Lwt_condition.t;
     verbose : bool;
@@ -924,7 +928,7 @@ module Make(T:TCPV4 (* controller *))(N:NETWORK) = struct
         return (pp "[switch] forward_frame: Port %ld unregistered \n%!" local)
 
 	(* XXX Controller port is removed ... *)
-    | Controller c -> begin (* XXX c doesn't exists in manual?! *)
+    | Controller c -> begin (* TODO c *)
        match st.controller with
        | None -> return ()
        | Some conn -> 
@@ -935,9 +939,10 @@ module Make(T:TCPV4 (* controller *))(N:NETWORK) = struct
 							; pi_reason = ExplicitSend
 							; pi_table_id = table
 							; pi_cookie = cookie
-							; pi_ofp_match =  of_match
+							; pi_ofp_match = if of_match = [] then [OxmInPort port] else of_match
 							}) 
 							in
+				let _ = pp "[switch] packet_in: %s\n" (PacketIn.to_string pkt_in) in
 				OSK.send_packet conn (Message.marshal (Random.int32 Int32.max_int) (PacketInMsg pkt_in)) 
 		  | None ->
 			  return (pp "[switch] forward_frame: Input port undefined!") (* XXX return error to the controller? *)
@@ -1072,8 +1077,10 @@ module Make(T:TCPV4 (* controller *))(N:NETWORK) = struct
    * and consider flow priorities *)
 	(* let _ = pp "[switch] comparing flow %s\n" (flow_info_to_string of_match) in *)
 	if (Hashtbl.mem table.cache of_match) then
-       let entry = (Hashtbl.find table.cache of_match) in
-     	Found(entry) 
+		(* let _ = Hashtbl.iter (fun m e -> pp "cache: %s\n Instructions: %s\n" (OfpMatch.to_string m) (Instructions.to_string (!e).Entry.instructions)) table.cache in *)
+    	let entry = (Hashtbl.find table.cache of_match) in
+		let _ = pp "exact match in table!\n" in
+     	Found(of_match, entry) 
 	else begin
      (* Check the wilcard card table *)
 	  let lookup_flow flow entry r =
@@ -1089,9 +1096,9 @@ module Make(T:TCPV4 (* controller *))(N:NETWORK) = struct
 		  match (flow_match) with
 		  | None ->  NOT_FOUND
 		  | Some(f,e) ->
-		    Hashtbl.add table.cache of_match (ref e);
+		    (* Hashtbl.add table.cache of_match (ref e); *)
 		    Entry.(e.match_fields <- of_match :: e.match_fields); 
-		  	  Found (ref e)
+		  	  Found (f, ref e)
 	end
 
 
@@ -1102,9 +1109,12 @@ module Make(T:TCPV4 (* controller *))(N:NETWORK) = struct
 		  | `Ok fl -> (return fl)  (* returns flow *)
 
   let process_frame st (p : port) frame =
-	let _ = p.pkt_count <- p.pkt_count + 1 in
-      p.in_push (Some frame);
-	  return ()
+	if !hello_sent then (* Frenetic throws exception if packet_in is sent before hello *)
+	  let _ = p.pkt_count <- p.pkt_count + 1 in
+    	p.in_push (Some frame);
+		return ()
+	else
+		return ()
 
   let init_switch_info ?(verbose=true) dpid = 
 	{ (* dev_to_port=(Hashtbl.create 64); *)
@@ -1203,27 +1213,22 @@ module Make(T:TCPV4 (* controller *))(N:NETWORK) = struct
 		get_aggr_stats_r tables (0L, 0L, 0l)
 
 
-let process_buffer_id (st : t) t msg xid buffer_id actions = (* XXX important: check functionality *)
+let process_buffer_id (st : t) t msg xid buffer_id port_in actions = (* XXX important: check functionality *)
   let pkt_in = ref None in
-
   let _ = 
-	st.packet_buffer <- (* Do we need to keep this big list? Also, pkt_in is the last one in the buffer?! *)
-      List.filter ( fun a -> 
-		match a.pi_payload with
-		| NotBuffered p -> true (* XXX WRONG: all elements of packet_buffer are buffered! *)
-		| Buffered (n, p) -> 
-			if (n = buffer_id) then
-    	  		(pkt_in := Some (a); false )
-			else true 
-			) st.packet_buffer in 
-			  match (!pkt_in) with 
-				| None ->
-					pp "[switch] invalid buffer id %ld\n%!" buffer_id; 
-					OSK.send_packet t (Message.marshal xid (Error {err = BadRequest ReqBufferUnknown; data = msg}))
-				| Some (pkt_in) ->
-					apply_of_actions st (None (* Some pkt_in.port *)) msg actions
-						pkt_in.pi_table_id pkt_in.pi_cookie pkt_in.pi_ofp_match
-						(* XXX check: pkt_in.data or msg? *)
+	st.packet_buffer <-
+      List.filter ( fun (id, frame) -> 
+		if (id = buffer_id) then
+    	  (pkt_in := Some frame; false )
+		else true
+		) st.packet_buffer in 
+		match (!pkt_in) with 
+		| None ->
+			pp "[switch] invalid buffer id %ld\n%!" buffer_id; 
+			OSK.send_packet t (Message.marshal xid (Error {err = BadRequest ReqBufferUnknown; data = msg}))
+		| Some frame ->
+			let (table_id, cookie, of_match) = (0, -1L, []) in
+			apply_of_actions st port_in msg actions table_id cookie of_match
 	
 let process_openflow (st : t) t (xid, msg) =
   let open Message in
@@ -1231,7 +1236,7 @@ let process_openflow (st : t) t (xid, msg) =
   let _ = if st.verbose then pp "[switch] %s\n%!" (Message.to_string msg) in
 
   match msg with
-	| Hello buf -> return ()
+	| Hello buf -> return () (* TODO: check version *)
 	| EchoRequest buf -> (* Reply to ECHO requests *)
     	OSK.send_packet t (Message.marshal xid msg) 
 	| EchoReply buf -> return (st.echo_resp_received <- true) 
@@ -1381,7 +1386,6 @@ let process_openflow (st : t) t (xid, msg) =
 	  in
 		return ()
 
-
   | GetConfigRequestMsg ->
 		OSK.send_packet t (Message.marshal xid (GetConfigReplyMsg { flags = NormalFrag; miss_send_len = st.pkt_len}))
 			(* XXX check it *)
@@ -1392,8 +1396,8 @@ let process_openflow (st : t) t (xid, msg) =
   | PacketOutMsg pkt -> 
 	begin
 	  match pkt.po_payload with 
-		| NotBuffered p -> apply_of_actions st pkt.po_port_id p pkt.po_actions 0 0L []
-		| Buffered (n, p) -> process_buffer_id st t p xid n pkt.po_actions 
+		| NotBuffered p -> apply_of_actions st pkt.po_port_id p pkt.po_actions 0 0L [] (* XXX cookie -1L? *)
+		| Buffered (n, p) -> process_buffer_id st t p xid n pkt.po_port_id pkt.po_actions 
 	end 
 
   | SetConfigMsg msg -> 
@@ -1432,8 +1436,8 @@ let process_openflow (st : t) t (xid, msg) =
 	done 
 
   let control_channel_run (st : t) conn = 
-	(* Trigger the dance between the 2 nodes *)
-	let _ = OSK.send_packet conn (Message.marshal 1l (Hello [VersionBitMap [0x10]])) in (* XXX check xid *)
+	let _ = OSK.send_packet conn (Message.marshal 1l (Hello [VersionBitMap [0x20]])) in (* XXX check xid *)
+	let _ = hello_sent := true in
 
 	let rec echo () =
 	  try_lwt
@@ -1451,7 +1455,7 @@ let process_openflow (st : t) t (xid, msg) =
 		(monitor_control_channel st conn)
 	  in 
 	  let _ = OSK.close conn in 
-		return (pp "[switch] control channel thread returned")
+		return (pp "[switch] control channel thread returned\n") (* TODO: terminate switch operation *)
 
 
   (*********************************************
@@ -1463,55 +1467,49 @@ let process_openflow (st : t) t (xid, msg) =
   	try_lwt
       let port_id = p.port_id in 
       let frame_match = (SoxmMatch.raw_packet_to_match port_id frame)  in 
-
 	  (* Update port rx statistics *)
 	  let _ = update_port_rx_stats (Int64.of_int (Cstruct.len frame)) p in
 
+	  let _ = print_endline "lookup frame:" in
+
 	  (* Lookup packet flow to existing flows in table *)
 		match  (lookup_flow (List.hd st.table) frame_match) with (* XXX TODO *)
-		  | NOT_FOUND -> begin
-			  (* Table.update_table_missed st.table; *) (* XXX check, do we need it? *)
+		  | NOT_FOUND -> begin (* TODO: This will be table-miss. To implement *)
+			  let _ = print_endline "table miss..." in
+			  (* Table.update_table_missed st.table; *)
 			  let buffer_id = st.packet_buffer_id in
-			  (*TODO Move this code in the Switch module *)
 			  st.packet_buffer_id <- Int32.add st.packet_buffer_id 1l;
 			  (*XXX what happens if packet_buffer_id overloads? *)
-			  let pkt_in = ({ pi_total_len = Cstruct.len frame
-							; pi_reason = NoMatch
-							; pi_table_id = (List.hd st.table).tid
-							; pi_cookie = -1L
-							; pi_ofp_match = frame_match
-							; pi_payload = Buffered (buffer_id, frame)
-							}) in
-			  st.packet_buffer <- pkt_in::st.packet_buffer; 
-
-			  (* XXX Disable for now packet trimming for buffered packets! *)
+			  st.packet_buffer <- (buffer_id, frame)::st.packet_buffer; 
 			  let size =
-				if (Cstruct.len frame > 92) then 92
+				if (Cstruct.len frame > 92) then 92 (* XXX check 92 *)
 				else Cstruct.len frame in
 				  let pkt_in = ({ pi_total_len = Cstruct.len frame
-							; pi_reason = NoMatch
-							; pi_table_id = (List.hd st.table).tid
-							; pi_cookie = -1L
-							; pi_ofp_match = frame_match
+							; pi_reason = ExplicitSend
+							; pi_table_id = (List.hd st.table).tid (* have to be changed *)
+							; pi_cookie = 0L
+							; pi_ofp_match = [OxmInPort port_id]
 							; pi_payload = Buffered (buffer_id, Cstruct.sub frame 0 size)
-							}) in				  
+							}) in
 					return (
 					  match st.controller with
-						| None -> pp "[switch] Controller not set."
+						| None -> pp "[switch] controller not set."
 						| Some conn ->
-							  ignore_result 
-								(OSK.send_packet conn (Message.marshal (Random.int32 Int32.max_int) (PacketInMsg pkt_in)))
+							let _ = pp "[switch*] packet_in: %s\n" (PacketIn.to_string pkt_in) in
+							ignore_result 
+							(OSK.send_packet conn (Message.marshal (Random.int32 Int32.max_int) (PacketInMsg pkt_in)))
 					)
       		end (* switch not found*)
 	       (* generate a packet in event *)
-		| Found (entry) ->
-			let _ = print_endline "entry found..." in
+		| Found (of_match, entry) -> (* not buffer? *)
+			let _ = pp "entry found: %s\n Instructions: %s\n" (OfpMatch.to_string of_match) (Instructions.to_string (!entry).instructions) in
 			(* let _ = Table.update_table_found st.table in *)
+			let instructions = (!entry).Entry.instructions in
+			let tid = (List.hd st.table).Table.tid in
+			let cookie = (!entry).Entry.counters.cookie.m_value in
 			let _ = Entry.update_flow (Int64.of_int (Cstruct.len frame)) !entry in
-			  apply_of_instructions st (Some port_id) frame (!entry).Entry.instructions
-				(List.hd st.table).Table.tid (!entry).Entry.counters.cookie.m_value frame_match
+			  apply_of_instructions st (Some port_id) frame instructions tid cookie of_match
 					(* TODO: list of tables *)
-				 	(* XXX cookie? *)
 	  with exn ->
 		return (pp "[switch] process_frame_inner: control channel error: %s\n" 
         	(Printexc.to_string exn))
