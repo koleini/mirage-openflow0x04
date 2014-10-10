@@ -41,8 +41,6 @@ type cookie = int64
 
 let resolve t = Lwt.on_success t (fun _ -> ())
 
-let cnt = ref 0
-let cnt' = ref 0
 let hello_sent = ref false
 
 let get_new_buffer len = 
@@ -713,13 +711,12 @@ module Make(T:TCPV4 (* controller *))(N:NETWORK) = struct
 							(of_match, entry, FlowHardTiemout )::ret
 						| _ -> ret
 						end
-		        | (_, l) -> begin
+		        | (_, l) -> begin (* TODO: this match case is unused! fix *)
 						match entry.counters.idle_timeout with
 						| ExpiresAfter x when (x > 0 && l >= x) ->
 							ret @ [(of_match, entry, FlowIdleTimeout )]
 						| _ -> ret
 						end
-		        | _ -> ret
 		  ) table.entries [] in 
 		    Lwt_list.iter_s (
 		      fun (of_match, entry, reason) -> 
@@ -1038,14 +1035,15 @@ module Make(T:TCPV4 (* controller *))(N:NETWORK) = struct
     in 
     lwt _ = apply_of_actions_rec st in_port bits false actions in 
     return ()
-
-  let apply_of_instructions (st : t) in_port bits (instructions : instruction list)  
-			table cookie of_match =
+(*
+  let apply_of_instructions (st : t) in_port bits table (of_match, entry) action_set =
+	let cookie = (!entry).Entry.counters.cookie.m_value in
+	let _ = Entry.update_flow (Int64.of_int (Cstruct.len bits)) !entry in
 	let open SoxmMatch in
     let apply_of_instructions_inner (st : t) in_port bits checksum instruction =
       try_lwt
         match instruction with
-		(* | GotoTable tid *)
+		(* | GotoTable tid -> table_lookup st table frame_match bits in_port action_set *)
 		| ApplyActions acts -> apply_of_actions st in_port bits acts table cookie of_match;
 		(*| WriteActions of actionSequence
 		| WriteMetadata of int64 mask
@@ -1066,9 +1064,9 @@ module Make(T:TCPV4 (* controller *))(N:NETWORK) = struct
         lwt _ = apply_of_instructions_inner st in_port bits checksum head in (* TODO checksum? *)
         apply_of_instructions_rec st in_port bits checksum instructions 
     in 
-    lwt _ = apply_of_instructions_rec st in_port bits false instructions in 
+    lwt _ = apply_of_instructions_rec st in_port bits false (!entry).instructions in 
     return ()
-
+*)
 
   let lookup_flow (table : Table.t) of_match =
   (* Check first the match table cache
@@ -1462,6 +1460,76 @@ let process_openflow (st : t) t (xid, msg) =
    * Switch OpenFlow data plane 
    *********************************************)
 
+let rec table_lookup st table frame_match frame port_id action_set =
+
+  let apply_of_instructions (st : t) bits table (of_match, entry) action_set =
+	let cookie = (!entry).Entry.counters.cookie.m_value in
+	let _ = Entry.update_flow (Int64.of_int (Cstruct.len bits)) !entry in
+	let open SoxmMatch in
+    let apply_of_instructions_inner (st : t) bits checksum instruction =
+      try_lwt
+        match instruction with
+		| GotoTable tid -> table_lookup st (List.nth st.table tid) frame_match frame port_id action_set
+		| ApplyActions acts -> apply_of_actions st (Some port_id) bits acts table.Table.tid cookie of_match;
+		(*| WriteActions of actionSequence
+		| WriteMetadata of int64 mask
+		| Clear
+		| Meter of int32
+		| Experimenter of int32 *)
+		| instr ->
+     	  	return (pp "[switch] apply_of_instructions: Unsupported set-fields %s" 
+                       		(Instruction.to_string instr))
+      with exn -> 
+        return (pp  "[switch] apply_of_instructions: (packet size %d) %s %s\n%!" 
+                     (Cstruct.len bits) (Instruction.to_string instruction) 
+                     (Printexc.to_string exn ))
+    in
+    let rec apply_of_instructions_rec (st : t) bits checksum = function
+      | [] -> return false
+      | head :: instructions -> 
+        lwt _ = apply_of_instructions_inner st bits checksum head in (* TODO checksum? *)
+        apply_of_instructions_rec st bits checksum instructions 
+    in 
+    lwt _ = apply_of_instructions_rec st bits false (!entry).instructions in 
+    return ()
+  in
+
+  (* Lookup packet flow to existing flows in table *)
+  match  (lookup_flow table frame_match) with (* XXX TODO *)
+  | NOT_FOUND -> begin (* TODO: This will be table-miss. To implement *)
+	let _ = print_endline "table miss..." in
+	(* Table.update_table_missed st.table; *)
+	let buffer_id = st.packet_buffer_id in
+	  st.packet_buffer_id <- Int32.add st.packet_buffer_id 1l;
+	  (*XXX what happens if packet_buffer_id overloads? *)
+	  st.packet_buffer <- (buffer_id, frame)::st.packet_buffer; 
+	  let size =
+		if (Cstruct.len frame > 92) then 92 (* XXX check 92 *)
+		else Cstruct.len frame in
+		  let pkt_in = ({ pi_total_len = Cstruct.len frame
+						; pi_reason = ExplicitSend
+						; pi_table_id = table.tid (* have to be changed *)
+						; pi_cookie = 0L
+						; pi_ofp_match = [OxmInPort port_id]
+						; pi_payload = Buffered (buffer_id, Cstruct.sub frame 0 size)
+						}) in
+			return (
+			  match st.controller with
+			  | None -> pp "[switch] controller not set."
+			  | Some conn ->
+				let _ = pp "[switch*] packet_in: %s\n" (PacketIn.to_string pkt_in) in
+					ignore_result 
+					(OSK.send_packet conn (Message.marshal (Random.int32 Int32.max_int) (PacketInMsg pkt_in)))
+			)
+    end (* switch not found*)
+	       (* generate a packet in event *)
+  | Found (of_match, entry) -> (* not buffer? *)
+	let _ = pp "entry found: %s\n Instructions: %s\n"
+				(OfpMatch.to_string of_match) (Instructions.to_string (!entry).instructions) in
+	  (* let _ = Table.update_table_found st.table in *)
+	  apply_of_instructions st frame table (of_match, entry) action_set
+
+
 (* in checking progress ... *)
   let process_frame_inner (st : t) (p : port) frame =
   	try_lwt
@@ -1469,50 +1537,11 @@ let process_openflow (st : t) t (xid, msg) =
       let frame_match = (SoxmMatch.raw_packet_to_match port_id frame)  in 
 	  (* Update port rx statistics *)
 	  let _ = update_port_rx_stats (Int64.of_int (Cstruct.len frame)) p in
-
 	  let _ = print_endline "lookup frame:" in
-
-	  (* Lookup packet flow to existing flows in table *)
-		match  (lookup_flow (List.hd st.table) frame_match) with (* XXX TODO *)
-		  | NOT_FOUND -> begin (* TODO: This will be table-miss. To implement *)
-			  let _ = print_endline "table miss..." in
-			  (* Table.update_table_missed st.table; *)
-			  let buffer_id = st.packet_buffer_id in
-			  st.packet_buffer_id <- Int32.add st.packet_buffer_id 1l;
-			  (*XXX what happens if packet_buffer_id overloads? *)
-			  st.packet_buffer <- (buffer_id, frame)::st.packet_buffer; 
-			  let size =
-				if (Cstruct.len frame > 92) then 92 (* XXX check 92 *)
-				else Cstruct.len frame in
-				  let pkt_in = ({ pi_total_len = Cstruct.len frame
-							; pi_reason = ExplicitSend
-							; pi_table_id = (List.hd st.table).tid (* have to be changed *)
-							; pi_cookie = 0L
-							; pi_ofp_match = [OxmInPort port_id]
-							; pi_payload = Buffered (buffer_id, Cstruct.sub frame 0 size)
-							}) in
-					return (
-					  match st.controller with
-						| None -> pp "[switch] controller not set."
-						| Some conn ->
-							let _ = pp "[switch*] packet_in: %s\n" (PacketIn.to_string pkt_in) in
-							ignore_result 
-							(OSK.send_packet conn (Message.marshal (Random.int32 Int32.max_int) (PacketInMsg pkt_in)))
-					)
-      		end (* switch not found*)
-	       (* generate a packet in event *)
-		| Found (of_match, entry) -> (* not buffer? *)
-			let _ = pp "entry found: %s\n Instructions: %s\n" (OfpMatch.to_string of_match) (Instructions.to_string (!entry).instructions) in
-			(* let _ = Table.update_table_found st.table in *)
-			let instructions = (!entry).Entry.instructions in
-			let tid = (List.hd st.table).Table.tid in
-			let cookie = (!entry).Entry.counters.cookie.m_value in
-			let _ = Entry.update_flow (Int64.of_int (Cstruct.len frame)) !entry in
-			  apply_of_instructions st (Some port_id) frame instructions tid cookie of_match
-					(* TODO: list of tables *)
-	  with exn ->
-		return (pp "[switch] process_frame_inner: control channel error: %s\n" 
-        	(Printexc.to_string exn))
+		table_lookup st (List.hd st.table) frame_match frame port_id []
+	with exn ->
+	  return (pp "[switch] process_frame_inner: control channel error: %s\n" 
+       	(Printexc.to_string exn))
 
 
   (* Swicth port input/output operation *)
@@ -1565,3 +1594,12 @@ let process_openflow (st : t) t (xid, msg) =
 
 end (* end of Switch module *)
 
+
+(* TODO before first release:
+
+1. Chain of tables
+2. Group table
+3. Statistics
+4. Chech cache operation
+
+*)
