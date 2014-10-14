@@ -20,7 +20,6 @@ open V1_LWT
 open Lwt
 open Packet
 
-
 open OpenFlow0x04
 open OpenFlow0x04_Core
 (* open OpenFlow0x04_Stats *)
@@ -42,6 +41,8 @@ type cookie = int64
 let resolve t = Lwt.on_success t (fun _ -> ())
 
 let hello_sent = ref false
+
+let max_table_num = 10
 
 let get_new_buffer len = 
   let buf = Io_page.to_cstruct (Io_page.get 1) in 
@@ -564,11 +565,16 @@ module Make(T:TCPV4 (* controller *))(N:NETWORK) = struct
 	  mutable counter : table_counter; (* TODO: update it *)
 	}
 
-	let init_table () = 
-		{ tid = 0; entries = (Hashtbl.create 10000); cache = (Hashtbl.create 10000);
+	let init_table id =
+		{ tid = id; entries = (Hashtbl.create 10000); cache = (Hashtbl.create 10000);
 		  counter = {n_active = 0l; n_lookups = 0L; n_matches = 0L}
 		} (* XXX tid 0 *)
 
+	let rec init_tables id =
+	  if id < max_table_num then
+		(init_table id) :: init_tables (id + 1)
+	  else
+		[]
 
 	(* TODO fix flow_mod flag support. overlap is not considered *)	
 	(* make it compliant with manual p37 *)
@@ -1035,38 +1041,7 @@ module Make(T:TCPV4 (* controller *))(N:NETWORK) = struct
     in 
     lwt _ = apply_of_actions_rec st in_port bits false actions in 
     return ()
-(*
-  let apply_of_instructions (st : t) in_port bits table (of_match, entry) action_set =
-	let cookie = (!entry).Entry.counters.cookie.m_value in
-	let _ = Entry.update_flow (Int64.of_int (Cstruct.len bits)) !entry in
-	let open SoxmMatch in
-    let apply_of_instructions_inner (st : t) in_port bits checksum instruction =
-      try_lwt
-        match instruction with
-		(* | GotoTable tid -> table_lookup st table frame_match bits in_port action_set *)
-		| ApplyActions acts -> apply_of_actions st in_port bits acts table cookie of_match;
-		(*| WriteActions of actionSequence
-		| WriteMetadata of int64 mask
-		| Clear
-		| Meter of int32
-		| Experimenter of int32 *)
-		| instr ->
-     	  	return (pp "[switch] apply_of_instructions: Unsupported set-fields %s" 
-                       		(Instruction.to_string instr))
-      with exn -> 
-        return (pp  "[switch] apply_of_instructions: (packet size %d) %s %s\n%!" 
-                     (Cstruct.len bits) (Instruction.to_string instruction) 
-                     (Printexc.to_string exn ))
-    in
-    let rec apply_of_instructions_rec (st : t) in_port bits checksum = function
-      | [] -> return false
-      | head :: instructions -> 
-        lwt _ = apply_of_instructions_inner st in_port bits checksum head in (* TODO checksum? *)
-        apply_of_instructions_rec st in_port bits checksum instructions 
-    in 
-    lwt _ = apply_of_instructions_rec st in_port bits false (!entry).instructions in 
-    return ()
-*)
+
 
   let lookup_flow (table : Table.t) of_match =
   (* Check first the match table cache
@@ -1121,7 +1096,7 @@ module Make(T:TCPV4 (* controller *))(N:NETWORK) = struct
 	last_echo_req=0.; echo_resp_received=true;
 	stats= {n_frags=0L; n_hits=0L; n_missed=0L; n_lost=0L;};
 	errornum = 0l; portnum=0l;
-	table = [Table.init_table ()]; (* XXX we create a single table at the moment *)
+	table = Table.init_tables 0; (* XXX we create a single table at the moment *)
 	features'=(switch_features dpid); 
 	packet_buffer=[]; packet_buffer_id=0l; ready=(Lwt_condition.create ());
 	verbose; pkt_len=1500;}
@@ -1461,39 +1436,66 @@ let process_openflow (st : t) t (xid, msg) =
    *********************************************)
 
 let rec table_lookup st table frame_match frame port_id action_set =
-
+  let order_instructions inst =
+	(List.filter (fun x -> match x with | Meter _ -> true | _ -> false) inst) @
+	(List.filter (fun x -> match x with | ApplyActions _ -> true | _ -> false) inst) @
+	(List.filter (fun x -> match x with | Clear _ -> true | _ -> false) inst) @
+	(List.filter (fun x -> match x with | WriteActions _ -> true | _ -> false) inst) @
+	(List.filter (fun x -> match x with | WriteMetadata _ -> true | _ -> false) inst) @
+	(List.filter (fun x -> match x with | GotoTable _ -> true | _ -> false) inst)
+  in
+  let modify_act_set wr_act act_set =
+	let act_to_num a =
+	match a with
+    | CopyTtlIn -> 0	| PopVlan -> 1	| PopMpls -> 2	| PopPbb ->	3	| PushMpls -> 4
+    | PushPbb -> 5		| PushVlan -> 6	| CopyTtlOut-> 7| DecNwTtl -> 8	| DecMplsTtl -> 9
+    | SetField _ -> 10	| SetNwTtl _ -> 11	| SetMplsTtl _ -> 12	| SetQueue _ ->	13
+    | Group _ -> 14		| Output _ -> 15
+    (* | Experimenter _ -> 16 *) (* XXX check *)
+	in
+	let rec unique = function
+	| [] -> []
+	| e1 :: e2 :: tl when act_to_num e1 = act_to_num e2 -> e1 :: unique tl
+	| hd :: tl -> hd :: unique tl
+	in
+	let al = wr_act @ act_set in (* order preserved *)
+	  unique (List.stable_sort (fun x y -> (act_to_num x) - (act_to_num y)) al)
+  in
   let apply_of_instructions (st : t) bits table (of_match, entry) action_set =
 	let cookie = (!entry).Entry.counters.cookie.m_value in
 	let _ = Entry.update_flow (Int64.of_int (Cstruct.len bits)) !entry in
 	let open SoxmMatch in
-    let apply_of_instructions_inner (st : t) bits checksum instruction =
-      try_lwt
-        match instruction with
-		| GotoTable tid -> table_lookup st (List.nth st.table tid) frame_match frame port_id action_set
-		| ApplyActions acts -> apply_of_actions st (Some port_id) bits acts table.Table.tid cookie of_match;
-		(*| WriteActions of actionSequence
-		| WriteMetadata of int64 mask
-		| Clear
-		| Meter of int32
-		| Experimenter of int32 *)
-		| instr ->
-     	  	return (pp "[switch] apply_of_instructions: Unsupported set-fields %s" 
-                       		(Instruction.to_string instr))
+    let rec apply_of_instructions_rec (st : t) bits checksum act_set inst =
+	  try_lwt
+	  match inst with
+      | [] ->						(* there is no Goto, execute action_set *)
+			apply_of_actions st (Some port_id) bits act_set table.Table.tid cookie of_match
+	  | Clear :: instructions ->	(* clears action_set *)
+			apply_of_instructions_rec st bits checksum [] instructions
+	  | WriteActions wr_act :: instructions ->
+			let new_act_set = modify_act_set wr_act act_set in
+			apply_of_instructions_rec st bits checksum new_act_set instructions
+	  | ApplyActions acts :: instructions ->
+			apply_of_actions st (Some port_id) bits acts table.Table.tid cookie of_match 
+	  | GotoTable tid :: instructions -> 
+			let next_table = List.nth st.table tid in
+			if (next_table.Table.tid > table.Table.tid) then
+			  table_lookup st (List.nth st.table tid) frame_match frame port_id action_set
+			else
+			  return (pp "[switch] apply_of_instructions: Goto table id <= table id %d" 
+                       		next_table.Table.tid) 
+	  | i :: instructions ->
+      	return (pp "[switch] apply_of_instructions: Unsupported instruction %s" 
+                       		(Instruction.to_string i))
+	  
       with exn -> 
         return (pp  "[switch] apply_of_instructions: (packet size %d) %s %s\n%!" 
-                     (Cstruct.len bits) (Instruction.to_string instruction) 
+                     (Cstruct.len bits) (Instruction.to_string (List.hd inst)) 
                      (Printexc.to_string exn ))
-    in
-    let rec apply_of_instructions_rec (st : t) bits checksum = function
-      | [] -> return false
-      | head :: instructions -> 
-        lwt _ = apply_of_instructions_inner st bits checksum head in (* TODO checksum? *)
-        apply_of_instructions_rec st bits checksum instructions 
     in 
-    lwt _ = apply_of_instructions_rec st bits false (!entry).instructions in 
+    lwt _ = apply_of_instructions_rec st bits false action_set (order_instructions (!entry).instructions) in 
     return ()
   in
-
   (* Lookup packet flow to existing flows in table *)
   match  (lookup_flow table frame_match) with (* XXX TODO *)
   | NOT_FOUND -> begin (* TODO: This will be table-miss. To implement *)
