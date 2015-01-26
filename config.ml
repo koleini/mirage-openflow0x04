@@ -1,6 +1,6 @@
 open Mirage
 
-let main = foreign "Unikernel.Main" (console @-> stackv4 @-> network @-> network @-> job)
+let main = foreign "Unikernel.Main" (console @-> stackv4 @-> network @-> network @-> network @-> job)
 
 let unix_libs =
   match get_mode () with 
@@ -32,5 +32,5 @@ let () =
     ([ "tcpip.ethif"; "tcpip.dhcpv4"; "tcpip.channel"; "cstruct.syntax"; "core_kernel"; "sexplib"; "sexplib.syntax"; "packet"; ] @ unix_libs);
 
   register "ofswitch" [
-    main $ default_console $ (stack default_console) $ (netif "1") $ (netif "2")
+    main $ default_console $ (stack default_console) $ tap0 $ (netif "1") $ (netif "2")
   ]

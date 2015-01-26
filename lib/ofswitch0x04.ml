@@ -196,46 +196,46 @@ module SwMatch = struct
 
   let oxm_to_num m =
     match m with
-    | OxmInPort _         -> 0
+    | OxmInPort _       -> 0
     | OxmInPhyPort _    -> 1
-    | OxmMetadata _        -> 2
-    | OxmEthType _        -> 3
-    | OxmEthDst _        -> 4
-    | OxmEthSrc _        -> 5
-    | OxmVlanVId _        -> 6
-    | OxmVlanPcp _        -> 7
-    | OxmIPProto _        -> 8
-    | OxmIPDscp _        -> 9
+    | OxmMetadata _     -> 2
+    | OxmEthType _      -> 3
+    | OxmEthDst _       -> 4
+    | OxmEthSrc _       -> 5
+    | OxmVlanVId _      -> 6
+    | OxmVlanPcp _      -> 7
+    | OxmIPProto _      -> 8
+    | OxmIPDscp _       -> 9
     | OxmIPEcn _        -> 10
-    | OxmIP4Src _        -> 11
-    | OxmIP4Dst _        -> 12
-    | OxmTCPSrc _        -> 13
-    | OxmTCPDst _        -> 14
+    | OxmIP4Src _       -> 11
+    | OxmIP4Dst _       -> 12
+    | OxmTCPSrc _       -> 13
+    | OxmTCPDst _       -> 14
     | OxmARPOp _        -> 15
-    | OxmARPSpa _        -> 16
-    | OxmARPTpa _        -> 17
-    | OxmARPSha _        -> 18
-    | OxmARPTha _        -> 19
-    | OxmICMPType _        -> 20
-    | OxmICMPCode _        -> 21
+    | OxmARPSpa _       -> 16
+    | OxmARPTpa _       -> 17
+    | OxmARPSha _       -> 18
+    | OxmARPTha _       -> 19
+    | OxmICMPType _     -> 20
+    | OxmICMPCode _     -> 21
     | OxmMPLSLabel _    -> 22
-    | OxmMPLSTc _        -> 23
-    | OxmTunnelId _        -> 24
-    | OxmUDPSrc _        -> 25
-    | OxmUDPDst _        -> 26
-    | OxmSCTPSrc _        -> 27
-    | OxmSCTPDst _        -> 28
-    | OxmIPv6Src _        -> 29
-    | OxmIPv6Dst _        -> 30
-    | OxmIPv6FLabel _    -> 31
-    | OxmICMPv6Type _    -> 32
-    | OxmICMPv6Code _    -> 33
-    | OxmIPv6NDTarget _    -> 34
+    | OxmMPLSTc _       -> 23
+    | OxmTunnelId _     -> 24
+    | OxmUDPSrc _       -> 25
+    | OxmUDPDst _       -> 26
+    | OxmSCTPSrc _      -> 27
+    | OxmSCTPDst _      -> 28
+    | OxmIPv6Src _      -> 29
+    | OxmIPv6Dst _      -> 30
+    | OxmIPv6FLabel _   -> 31
+    | OxmICMPv6Type _   -> 32
+    | OxmICMPv6Code _   -> 33
+    | OxmIPv6NDTarget _ -> 34
     | OxmIPv6NDSll _    -> 35
     | OxmIPv6NDTll _    -> 36
-    | OxmMPLSBos _        -> 37
-    | OxmPBBIsid _        -> 38
-    | OxmIPv6ExtHdr _    -> 39
+    | OxmMPLSBos _      -> 37
+    | OxmPBBIsid _      -> 38
+    | OxmIPv6ExtHdr _   -> 39
 
   (* TODO: sort ofpMatch sent by controller before any processing ... *)
   let sort_of_match m1 m2 = (oxm_to_num m1) - (oxm_to_num m2)
@@ -1020,7 +1020,7 @@ module Make(T:TCPV4 (* controller *))(N:NETWORK) = struct
     else
         return ()
 
-  let init_switch_info ?(verbose=true) dpid = 
+  let init_switch_info ?(verbose=false) dpid = 
     { (* dev_to_port=(Hashtbl.create 64); *)
     int_to_port = (Hashtbl.create 64); ports = [];
     controller=None;
@@ -1239,7 +1239,7 @@ module Make(T:TCPV4 (* controller *))(N:NETWORK) = struct
             let stats = PortStatsReply (List.map (fun x -> x.counter) st.ports) in
             let rep = {mpreply_typ = stats; mpreply_flags = false} in
                OSK.send_packet conn (Message.marshal xid (MultipartReply rep)) 
-    (* XXX TODO
+    (* TODO:
           | QueueStatsReq of queueRequest
           | GroupStatsReq of int32
           | GroupDescReq
@@ -1424,7 +1424,7 @@ let rec table_lookup st table frame_match frame port_id action_set =
   (* Lookup packet flow to existing flows in table *)
   match  (lookup_flow table frame_match) with    
   | NOT_FOUND -> begin                            (* TODO: table-miss to implement *)
-    let _ = print_endline "table miss..." in
+    let _ = if st.verbose then print_endline "table miss..." in
     (* Table.update_table_missed st.table; *)
     let buffer_id = st.packet_buffer_id in
       st.packet_buffer_id <- Int32.add st.packet_buffer_id 1l;
@@ -1444,15 +1444,15 @@ let rec table_lookup st table frame_match frame port_id action_set =
               match st.controller with
               | None -> pp "[switch] controller not set."
               | Some conn ->
-                let _ = pp "[switch*] packet_in: %s\n" (PacketIn.to_string pkt_in) in
+                let _ = if st.verbose then pp "[switch] packet_in: %s\n" (PacketIn.to_string pkt_in) in
                     ignore_result 
                     (OSK.send_packet conn (Message.marshal (Random.int32 Int32.max_int) (PacketInMsg pkt_in)))
             )
     end (* switch not found*)
   | Found (of_match, entry) ->                     (* XXX not buffer? *)
-    let _ = pp "entry found: %s\n Instructions: %s\n"
+    let _ = if st.verbose then pp "entry found: %s\n Instructions: %s\n"
                 (OfpMatch.to_string of_match) (Instructions.to_string (!entry).instructions) in
-      (* TODo: let _ = Table.update_table_found st.table in *)
+      (* TODO: let _ = Table.update_table_found st.table in *)
       apply_of_instructions st frame table (of_match, entry) action_set
 
 
@@ -1463,7 +1463,7 @@ let rec table_lookup st table frame_match frame port_id action_set =
       let frame_match = (SwMatch.raw_packet_to_match port_id frame)  in 
       (* Update port rx statistics *)
       let _ = update_port_rx_stats (Int64.of_int (Cstruct.len frame)) p in
-      let _ = print_endline "lookup frame:" in
+      let _ = if st.verbose then print_endline "lookup frame:" in
         table_lookup st (List.hd st.table) frame_match frame port_id []
     with exn ->
       return (pp "[switch] process_frame_inner: control channel error: %s\n" 
@@ -1479,7 +1479,7 @@ let rec table_lookup st table frame_match frame port_id action_set =
       done  <&> (
       while_lwt true do
         lwt frame = Lwt_stream.next p.out_queue in
-        E.write p.ethif frame
+        E.writev p.ethif [frame]
       done
       )
     ) st.ports
@@ -1491,7 +1491,7 @@ let rec table_lookup st table frame_match frame port_id action_set =
       | eth::t -> add_port sw eth >> add_switch_ports sw t
 
 
-  let create_switch tcp cont ethlist =
+  let create_switch tcp cont ethlist dpid =
     let rec connect_socket () =
       let sock = ref None in 
         try_lwt
@@ -1505,8 +1505,8 @@ let rec table_lookup st table frame_match frame port_id action_set =
             | Some t -> return t 
         with exn -> OS.Time.sleep 10.0 >> connect_socket ()
     in
-      let sw = init_switch_info ~verbose:false 0x100L (* model *) in
-        (* TODO1: move 'verbose' and 'dpid' to the unikernel. Check if to choose a rand for dpid *)
+      let sw = init_switch_info ~verbose:false dpid (* model *) in
+        (* TODO: move 'verbose' and 'dpid' to the unikernel. Check if to choose a rand for dpid *)
         lwt _ = add_switch_ports sw ethlist in
         connect_socket ()
         >>= fun fl -> 
