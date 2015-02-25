@@ -1371,11 +1371,11 @@ let rec table_lookup st table frame_match frame port_id action_set =
   let modify_act_set wr_act act_set =
     let act_to_num a =
     match a with
-    | CopyTtlIn -> 0    | PopVlan -> 1    | PopMpls -> 2    | PopPbb ->    3    | PushMpls -> 4
-    | PushPbb -> 5        | PushVlan -> 6    | CopyTtlOut-> 7| DecNwTtl -> 8    | DecMplsTtl -> 9
-    | SetField _ -> 10    | SetNwTtl _ -> 11
-    | SetMplsTtl _ -> 12| SetQueue _ ->    13
-    | Group _ -> 14        | Output _ -> 15
+    | CopyTtlIn -> 0     | PopVlan -> 1     | PopMpls -> 2   | PopPbb -> 3   | PushMpls -> 4
+    | PushPbb -> 5       | PushVlan -> 6    | CopyTtlOut-> 7 | DecNwTtl -> 8 | DecMplsTtl -> 9
+    | SetField _ -> 10   | SetNwTtl _ -> 11
+    | SetMplsTtl _ -> 12 | SetQueue _ -> 13
+    | Group _ -> 14      | Output _ -> 15
     (* | Experimenter _ -> 16 *)                 (* XXX check experimenter *)
     in
     let rec unique = function

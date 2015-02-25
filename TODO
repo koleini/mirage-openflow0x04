@@ -1,6 +1,6 @@
 todo:
 
-dpid in init_switch_info?
+DONE dpid in init_switch_info?
 Page 69 of 1.4.0
 
 port name in port structure is ""
@@ -31,7 +31,7 @@ Handling timeouts?
 
 Group table
 
-Statistics
+Statistics, use netif info instead of calculating it agian
 
 Chech cache operation
 
