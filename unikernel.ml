@@ -15,16 +15,8 @@ let contport = 6633
 
 module Main (C: CONSOLE)(S: STACKV4)(N0: NETWORK)(N1: NETWORK)(N2: NETWORK) = struct
 
-
-  let or_error c name fn t =
-    fn t
-    >>= function
-    | `Error e -> fail (Failure ("error starting " ^ name))
-    | `Ok t -> C.log_s c (green "%s connected..." name) >>
-               return t
-
   module T = S.TCPV4
-  module Sw = Ofswitch0x04.Make(T)(N1)
+  module Sw = Ofswitch0x01.Make(T)(N1)
 
   let start console s n0 n1 n2 =
 
