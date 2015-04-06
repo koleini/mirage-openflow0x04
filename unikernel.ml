@@ -24,7 +24,6 @@ module Main (C: CONSOLE)(S: STACKV4)(N0: NETWORK)(N1: NETWORK)(N2: NETWORK) = st
                return t
 
   module T = S.TCPV4
-  module E = Ethif.Make(N1)
   module Sw = Ofswitch0x04.Make(T)(N1)
 
   let start console s n0 n1 n2 =
@@ -44,19 +43,10 @@ module Main (C: CONSOLE)(S: STACKV4)(N0: NETWORK)(N1: NETWORK)(N2: NETWORK) = st
      Int64.logor imac rnd
   in
   let netl = [n1; n2] in
-    (* mirage main module <= 1.2.0 doesn't accept list as the parameter.
-       write input network devices as a list until mirage supprts list parameters *)
-  let rec connect_ifs nl acc =
-    match nl with
-    | [] -> return acc
-    | n::t -> or_error console "ethernet interface" E.connect n >>= fun x -> (connect_ifs t (x::acc))
-        (* to do: ethernet interface -> name of the interface: tap1, tap2, ... *)
-  in
     C.log_s console 
       (sprintf "IP address: %s\n"
         (String.concat ", " (List.map Ipaddr.V4.to_string (S.IPV4.get_ip (S.ipv4 s)))))
-    >> connect_ifs netl []
     >>= fun e ->
-        Sw.create_switch (S.tcpv4 s) (contaddr, contport) e dpid
+        Sw.create_switch (S.tcpv4 s) (contaddr, contport) netl dpid
 
 end
