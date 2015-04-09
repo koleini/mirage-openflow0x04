@@ -19,7 +19,9 @@ let val_to_mask v =
 
 let ip_to_mask (p,m) =
   if m = 32l then { m_value = p; m_mask = None }
-  else { m_value = p; m_mask = Some m }
+  else 
+    let m = Int32.shift_left 0xffffffffl (Int32.to_int (Int32.sub 32l m)) in
+    { m_value = p; m_mask = Some m }
 
 type switchId = int64
 
@@ -601,7 +603,7 @@ type meterConfig = { length : length; flags : meterFlags; meter_id : int32; band
 
 type meterBandMaps = { drop : bool; dscpRemark : bool}
 
-type meterFeaturesStats = { max_meter : int32; band_typ : meterBandMaps; 
+type meterFeatures = { max_meter : int32; band_typ : meterBandMaps; 
                             capabilities : meterFlags; max_band : int8;
                             max_color : int8 }
 
@@ -619,7 +621,7 @@ type multipartReplyTyp =
   | GroupFeaturesReply of groupFeatures
   | MeterReply of meterStats list
   | MeterConfig of meterConfig list
-  | MeterFeaturesReply of meterFeaturesStats
+  | MeterFeaturesReply of meterFeatures
 
 type multipartReply = {mpreply_typ : multipartReplyTyp; mpreply_flags : bool}
 
@@ -655,7 +657,13 @@ type element =
 
 type helloElement = element list
 
-type asyncConfig = { packet_in : packetInReason asyncMask; 
-                     port_status : portReason asyncMask;
-                     flow_removed : flowReason asyncMask }
+type packetInReasonMap =  { table_miss : bool; apply_action : bool; invalid_ttl : bool }
 
+type portReasonMap =  { add : bool; delete : bool; modify : bool }
+
+type flowReasonMask = { idle_timeout : bool; hard_timeout : bool; delete : bool; 
+                        group_delete : bool}
+
+type asyncConfig = { packet_in : packetInReasonMap asyncMask; 
+                     port_status : portReasonMap asyncMask;
+                     flow_removed : flowReasonMask asyncMask }

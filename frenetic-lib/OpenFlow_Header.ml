@@ -1,4 +1,4 @@
-(* open Core_kernel.Std *)
+(* open Core.Std *)
 
 type xid = Int32.t (* with sexp *)
 

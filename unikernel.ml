@@ -2,8 +2,8 @@ open V1_LWT
 open Lwt
 open Printf
 
-open Ofswitch0x01
-open Ofsocket0x01
+open Ofswitch0x04
+open Ofsocket0x04
 
 let red fmt    = Printf.sprintf ("\027[31m"^^fmt^^"\027[m")
 let green fmt  = Printf.sprintf ("\027[32m"^^fmt^^"\027[m")
@@ -16,7 +16,7 @@ let contport = 6633
 module Main (C: CONSOLE)(S: STACKV4)(N0: NETWORK)(N1: NETWORK)(N2: NETWORK) = struct
 
   module T = S.TCPV4
-  module Sw = Ofswitch0x01.Make(T)(N1)
+  module Sw = Ofswitch0x04.Make(T)(N1)
 
   let start console s n0 n1 n2 =
 

@@ -1,5 +1,17 @@
 todo:
 
+1. On Xen, some packets are duplicated (check if they original acks are lost or out of sync), resulting Frenetic controller to crash (check the crash reason on frenetic.) Works ok with unix config.
+
+2. Fix warnings.
+
+3. Suggest change to Frenetic:
+--
+ | FEATURES_REQ -> FeaturesRequest
+ is missed from Message.parse, resulting in an exception in switch.
+ 
+--
+  can we use page-aligned buffer instead of Cstruct.create?
+
 DONE dpid in init_switch_info?
 Page 69 of 1.4.0
 

@@ -242,7 +242,7 @@ module SwMatch = struct
 
 
   let raw_packet_to_match in_port bits = (* builds openflow match in order *)
-  	(*
+      (*
     let ethDst = Packet.mac_of_bytes (Cstruct.to_string (get_dl_header_dl_dst bits)) in
     let ethSrc = Packet.mac_of_bytes (Cstruct.to_string (get_dl_header_dl_src bits)) in
     *)
@@ -672,7 +672,10 @@ module Make(T:TCPV4 (* controller *))(N:NETWORK) = struct
   (* end of module table *)
 
   let init_port port_no ethif =
-    let name = "" in                        (* TODO *)
+    (* name has to be s string of length 16
+       in order not to raise Cstruct exception when marshalling *)
+    (* TODO: extract interface name *)
+    let name = String.make 16 '\x00' in
     let hw_addr = Packet.mac_of_string (Macaddr.to_string (N.mac ethif)) in
     let (in_queue, in_push) = Lwt_stream.create () in
     let (out_queue, out_push) = Lwt_stream.create () in
@@ -684,9 +687,9 @@ module Make(T:TCPV4 (* controller *))(N:NETWORK) = struct
     in
     let features =                                (* XXX all rates are set to true *)
         { rate_10mb_hd=true; rate_10mb_fd=true; rate_100mb_hd=true; rate_100mb_fd=true;
-            rate_1gb_hd=true; rate_1gb_fd=true; rate_10gb_fd=true; rate_40gb_fd=true;
-            rate_100gb_fd=true; rate_1tb_fd=true; other=true; copper=true; fiber=true;
-            autoneg=true; pause=true; pause_asym=true }  
+          rate_1gb_hd=true; rate_1gb_fd=true; rate_10gb_fd=true; rate_40gb_fd=true;
+          rate_100gb_fd=true; rate_1tb_fd=true; other=true; copper=true; fiber=true;
+          autoneg=true; pause=true; pause_asym=true }  
     in
     let config = { port_down=false; no_recv=false; no_fwd=false; no_packet_in=false } in 
     let state = { link_down=false; blocked=false; live=true } in (* XXX liveness *)
@@ -876,7 +879,7 @@ module Make(T:TCPV4 (* controller *))(N:NETWORK) = struct
                             ; pi_ofp_match = if of_match = [] then [OxmInPort port] else of_match
                             }) 
                             in
-                let _ = pp "[switch] packet_in: %s\n" (PacketIn.to_string pkt_in) in
+                let _ = if st.verbose then pp "[switch] packet_in: %s\n" (PacketIn.to_string pkt_in) in
                 OSK.send_packet conn (Message.marshal (Random.int32 Int32.max_int) (PacketInMsg pkt_in)) 
           | None ->
               return (pp "[switch] forward_frame: Input port undefined!") (* XXX return error to the controller? *)
@@ -980,7 +983,7 @@ module Make(T:TCPV4 (* controller *))(N:NETWORK) = struct
    * and consider flow priorities *)
     if (Hashtbl.mem table.cache of_match) then
       let entry = (Hashtbl.find table.cache of_match) in
-      let _ = pp "exact match in table!\n" in
+      (* pp "match found in cache!\n" in *)
          Found(of_match, entry) 
     else begin
      (* Check the wilcard card table *)
@@ -1130,6 +1133,7 @@ module Make(T:TCPV4 (* controller *))(N:NETWORK) = struct
     let open Message in
 
     let _ = if st.verbose then pp "[switch] %s\n%!" (Message.to_string msg) in
+    (* let _ = pp "[switch] %s\n%!" (Message.to_string msg) in *)
 
     match msg with
     | Hello buf -> return ()                     (* TODO: check version *)
@@ -1148,11 +1152,11 @@ module Make(T:TCPV4 (* controller *))(N:NETWORK) = struct
                     ; sw_desc = "Mirage"
                     ; serial_num = "0.1" } in
             let rep = {mpreply_typ = p; mpreply_flags = false} in (* XXX check flag *)
-               OSK.send_packet conn (Message.marshal xid (MultipartReply rep)) 
+                OSK.send_packet conn (Message.marshal xid (MultipartReply rep)) 
           | PortsDescReq ->
             let stats = PortsDescReply (List.map (fun x -> x.phy) st.ports) in
             let rep = {mpreply_typ = stats; mpreply_flags = false} in (* XXX check flag *)
-               OSK.send_packet conn (Message.marshal xid (MultipartReply rep))
+                OSK.send_packet conn (Message.marshal xid (MultipartReply rep))
 
           | FlowStatsReq 
                 { fr_table_id = table_id; fr_out_port = port
@@ -1463,6 +1467,7 @@ let rec table_lookup st table frame_match frame port_id action_set =
       let _ = if st.verbose then print_endline "lookup frame:" in
         table_lookup st (List.hd st.table) frame_match frame port_id []
     with exn ->
+      OS.Time.sleep 10.0 >>
       return (pp "[switch] process_frame_inner: control channel error: %s\n" 
            (Printexc.to_string exn))
 
