@@ -52,7 +52,7 @@ module Make(T:V1_LWT.TCPV4) = struct
   let read_packet conn =
 	lwt hbuf = Channel.read_some conn.t.sock ~len:(Header.size) in
 	let ofh  = Header.parse hbuf in
-	let dlen = ofh.length - Header.size in 
+	let dlen = ofh.Header.length - Header.size in 
 	lwt dbuf = 
 	  if (dlen = 0) then 
 	    return (Cstruct.create 0)
